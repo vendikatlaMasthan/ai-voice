@@ -1032,17 +1032,24 @@ class PipelineWorker:
                     "data": {"error_type": "UnknownCommandError", "message": f"Unknown command: {cmd}"},
                 }
         except AudioTooShortError as err:
-            return {"status": 422, "data": {"error_type": "AudioTooShortError", "message": str(err), "status": 422}}
+            sys.stderr.write(f"[TechnicalError:AudioTooShort] {err}\n")
+            return {"status": 422, "data": {"error_type": "AudioTooShortError", "message": "The voice recording is too short. Please speak for at least 1 second.", "status": 422}}
         except AudioTooLongError as err:
-            return {"status": 422, "data": {"error_type": "AudioTooLongError", "message": str(err), "status": 422}}
+            sys.stderr.write(f"[TechnicalError:AudioTooLong] {err}\n")
+            return {"status": 422, "data": {"error_type": "AudioTooLongError", "message": "The audio recording exceeds the maximum allowed duration. Please provide a shorter clip.", "status": 422}}
         except AudioSilentError as err:
-            return {"status": 422, "data": {"error_type": "AudioSilentError", "message": str(err), "status": 422}}
+            sys.stderr.write(f"[TechnicalError:AudioSilent] {err}\n")
+            return {"status": 422, "data": {"error_type": "AudioSilentError", "message": "No clear voice was detected. Please ensure your microphone is active and speak clearly.", "status": 422}}
         except (AudioCorruptError, UnsupportedFormatError) as err:
-            return {"status": 400, "data": {"error_type": "AudioCorruptError", "message": str(err), "status": 400}}
+            sys.stderr.write(f"[TechnicalError:AudioCorrupt] {err}\n")
+            return {"status": 400, "data": {"error_type": "AudioCorruptError", "message": "We couldn't process this audio. Please try recording or uploading again.", "status": 400}}
         except FileNotFoundAudioError as err:
-            return {"status": 404, "data": {"error_type": "FileNotFoundAudioError", "message": str(err), "status": 404}}
+            sys.stderr.write(f"[TechnicalError:FileNotFound] {err}\n")
+            return {"status": 404, "data": {"error_type": "FileNotFoundAudioError", "message": "The audio file could not be found. Please try again.", "status": 404}}
         except Exception as err:
-            return {"status": 500, "data": {"error_type": "InferenceError", "message": str(err), "status": 500}}
+            import traceback
+            sys.stderr.write(f"[TechnicalError:InferenceError] {traceback.format_exc()}\n")
+            return {"status": 500, "data": {"error_type": "InferenceError", "message": "We couldn't process this audio. Please try recording again.", "status": 500}}
 
 
 def cmd_daemon():

@@ -46,7 +46,12 @@ export const RecordView: React.FC<RecordViewProps> = ({
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRecorder = new MediaRecorder(stream);
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : MediaRecorder.isTypeSupported("audio/webm")
+        ? "audio/webm"
+        : "";
+      const mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
 
       mediaRecorder.ondataavailable = (event) => {
@@ -56,7 +61,8 @@ export const RecordView: React.FC<RecordViewProps> = ({
       };
 
       mediaRecorder.onstop = () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: "audio/wav" });
+        const actualMime = mimeType || mediaRecorder.mimeType || "audio/webm";
+        const audioBlob = new Blob(audioChunksRef.current, { type: actualMime });
         setRecordedBlob(audioBlob);
         setAudioUrl(URL.createObjectURL(audioBlob));
         // Stop all tracks
@@ -109,8 +115,9 @@ export const RecordView: React.FC<RecordViewProps> = ({
 
   const handleAnalyzeRecordedVoice = async () => {
     if (!recordedBlob) return;
-    const file = new File([recordedBlob], `microphone_recording_${Date.now()}.wav`, {
-      type: "audio/wav",
+    const ext = recordedBlob.type.includes("mp4") ? "m4a" : "webm";
+    const file = new File([recordedBlob], `microphone_recording_${Date.now()}.${ext}`, {
+      type: recordedBlob.type || "audio/webm",
     });
     await onAnalyze(file, file.name);
   };

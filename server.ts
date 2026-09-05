@@ -582,112 +582,116 @@ app.get("/api/samples", (_req, res) => {
 // Serve sample files statically
 app.use("/data/samples", express.static(path.join(process.cwd(), "data", "samples")));
 
+/**
+ * Shared audio conversion step: Converts any incoming audio file
+ * (WebM, MP3, M4A, FLAC, AAC, WAV, etc.) to standard 16kHz mono 16-bit PCM WAV.
+ * Used identically for both Upload and Record flows.
+ */
+function convertToStandardWav(inputPath: string, outputPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (!fs.existsSync(inputPath)) {
+      return reject(new Error(`Input audio file does not exist: ${inputPath}`));
+    }
+    const stat = fs.statSync(inputPath);
+    if (stat.size === 0) {
+      return reject(new Error(`Input audio file is empty (0 bytes): ${inputPath}`));
+    }
+
+    const args = [
+      "-y",
+      "-nostdin",
+      "-v", "error",
+      "-i", inputPath,
+      "-ar", "16000",
+      "-ac", "1",
+      "-c:a", "pcm_s16le",
+      "-f", "wav",
+      outputPath,
+    ];
+
+    const proc = spawn("ffmpeg", args);
+    let stderr = "";
+
+    proc.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    proc.on("error", (err) => {
+      reject(new Error(`Failed to spawn ffmpeg: ${err.message}`));
+    });
+
+    proc.on("close", (code) => {
+      if (code === 0 && fs.existsSync(outputPath) && fs.statSync(outputPath).size > 44) {
+        resolve();
+      } else {
+        reject(new Error(`ffmpeg conversion failed (exit code ${code}): ${stderr.trim()}`));
+      }
+    });
+  });
+}
+
 // 4. Ingest & Analyze: /analyze and /api/analyze
 const handleAnalyze = async (req: express.Request, res: express.Response) => {
   const file = req.file;
   if (!file) {
-    return res.status(422).json({
+    return res.status(400).json({
       error_type: "MissingFileError",
-      message: "Audio file upload is required (.wav, .flac, .mp3).",
+      message: "Please select or record an audio file to analyze.",
     });
   }
 
-  const params: Record<string, any> = {
-    file: file.path,
-  };
-
-  if (req.body.speaker_id) params.speaker_id = String(req.body.speaker_id);
-  if (req.body.verification_threshold) params.threshold = parseFloat(req.body.verification_threshold);
-  if (req.body.caller_id) params.caller_id = String(req.body.caller_id);
-  if (req.body.contact_id) params.contact_id = String(req.body.contact_id);
-  if (req.body.organization_id) params.organization_id = String(req.body.organization_id);
-  if (req.body.is_caller_recognized !== undefined) {
-    params.is_caller_recognized = String(req.body.is_caller_recognized).toLowerCase() === "true" || req.body.is_caller_recognized === true;
-  }
-  if (req.body.is_previously_flagged !== undefined) {
-    params.is_previously_flagged = String(req.body.is_previously_flagged).toLowerCase() === "true" || req.body.is_previously_flagged === true;
-  }
-  if (req.body.claimed_role) params.claimed_role = String(req.body.claimed_role);
-  if (req.body.requested_transaction_amount) {
-    params.requested_amount = parseFloat(req.body.requested_transaction_amount);
-  }
-  if (req.body.normal_transaction_amount) {
-    params.normal_amount = parseFloat(req.body.normal_transaction_amount);
-  }
-  if (req.body.transaction_reference) params.transaction_reference = String(req.body.transaction_reference);
-  if (req.body.is_urgent !== undefined) {
-    params.is_urgent = String(req.body.is_urgent).toLowerCase() === "true" || req.body.is_urgent === true;
-  }
-  if (req.body.urgency_reason) params.urgency_reason = String(req.body.urgency_reason);
-  if (req.body.transcript_text) params.transcript_text = String(req.body.transcript_text);
-  if (req.body.acoustic_anomaly_override) {
-    params.acoustic_anomaly = parseFloat(req.body.acoustic_anomaly_override);
-  }
-
-  // Multilingual speech options (Non-authoritative metadata)
-  if (req.body.selected_language) params.selected_language = String(req.body.selected_language);
-  if (req.body.language) params.language = String(req.body.language);
-  if (req.body.detected_language) params.detected_language = String(req.body.detected_language);
-  if (req.body.language_confidence !== undefined) params.language_confidence = parseFloat(req.body.language_confidence);
-  if (req.body.accent_region) params.accent_region = String(req.body.accent_region);
-  if (req.body.accent_profile) params.accent_profile = String(req.body.accent_profile);
-  if (req.body.transcript_language) params.transcript_language = String(req.body.transcript_language);
-
-  let enrichedContext: EnrichedCallContext | null = null;
+  const rawPath = file.path;
+  const standardWavPath = path.join(path.dirname(rawPath), `std_${Date.now()}_${path.basename(rawPath)}.wav`);
 
   try {
-    // 1. Retrieve enriched contextual fraud intelligence from Supabase & policies
+    // 1. Shared Conversion Step: Standardize all audio files (uploaded & recorded) to 16kHz Mono WAV PCM
     try {
-      enrichedContext = await contextService.retrieveCallContext({
-        organization_id: params.organization_id,
-        caller_id: params.caller_id,
-        contact_id: params.contact_id,
-        speaker_id: params.speaker_id,
-        claimed_role: params.claimed_role,
-        requested_amount: params.requested_amount,
-        normal_amount: params.normal_amount,
-        transaction_reference: params.transaction_reference,
-        is_urgent: params.is_urgent,
-        urgency_reason: params.urgency_reason,
-        transcript_text: params.transcript_text,
-        is_caller_recognized: params.is_caller_recognized,
-        is_previously_flagged: params.is_previously_flagged,
-        selected_language: params.selected_language || params.language,
-        language: params.language || params.selected_language,
-        detected_language: params.detected_language,
-        language_confidence: params.language_confidence,
-        accent_region: params.accent_region || params.accent_profile,
-        accent_profile: params.accent_profile || params.accent_region,
-        transcript_language: params.transcript_language,
-      });
+      await convertToStandardWav(rawPath, standardWavPath);
+    } catch (convErr: any) {
+      // Technical log ONLY on server console
+      console.error(`[AudioConversionError] Technical error converting '${rawPath}':`, convErr.message);
 
-      params.context = enrichedContext;
-    } catch (ctxErr: any) {
-      console.warn("[ContextService:RetrieveError]", ctxErr.message);
+      // Clean plain-language message with NO raw file paths or stack traces
+      return res.status(400).json({
+        error_type: "AudioProcessingError",
+        message: "We couldn't process this audio. Please check the file format or try recording again.",
+      });
     }
+
+    const params: Record<string, any> = {
+      file: standardWavPath,
+    };
 
     const result = await daemonManager.request("analyze", params);
-    if (result.status === 200 && result.data && result.data.call_id) {
-      if (result.data.verification_session) {
-        activeVerificationSessions.set(result.data.call_id, result.data.verification_session);
-      }
-      recordSecurityEventFromAnalysis(result.data, params, req.body, enrichedContext);
-    }
-    res.status(result.status).json(result.data);
 
-    // Asynchronously persist metadata in background without blocking response
-    if (result.status === 200 && result.data && result.data.call_id) {
-      persistAnalysisToSupabase(result.data, params, req.body, enrichedContext).catch((dbErr) => {
-        console.warn("[Supabase:AsyncError] Unhandled error during persistence:", dbErr.message);
+    if (result.status !== 200) {
+      console.error(`[DaemonAnalyzeError] Technical error from inference daemon:`, result.data);
+      const rawMsg = String(result.data?.message || "");
+      let userMsg = "We couldn't process this audio. Please try recording again.";
+      if (result.data?.error_type === "AudioTooShortError" || rawMsg.includes("short")) {
+        userMsg = "The voice recording is too short. Please speak for at least 1 second.";
+      } else if (result.data?.error_type === "AudioSilentError" || rawMsg.includes("silent") || rawMsg.includes("Silence")) {
+        userMsg = "No clear voice was detected. Please ensure your microphone is active and speak clearly.";
+      }
+
+      return res.status(result.status).json({
+        error_type: result.data?.error_type || "AudioProcessingError",
+        message: userMsg,
       });
     }
+
+    res.status(200).json(result.data);
+  } catch (err: any) {
+    console.error("[ServerError:Analyze] Technical error:", err);
+    return res.status(500).json({
+      error_type: "ServerError",
+      message: "We encountered an unexpected issue analyzing this voice sample. Please try again.",
+    });
   } finally {
-    // Clean up uploaded temporary file immediately
     try {
-      if (fs.existsSync(file.path)) {
-        fs.unlinkSync(file.path);
-      }
-    } catch (e) {
+      if (fs.existsSync(rawPath)) fs.unlinkSync(rawPath);
+      if (fs.existsSync(standardWavPath)) fs.unlinkSync(standardWavPath);
+    } catch {
       // ignore
     }
   }
