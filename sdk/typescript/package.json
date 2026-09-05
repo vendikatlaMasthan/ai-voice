@@ -1,0 +1,13 @@
+{
+  "name": "@voiceshield/sdk",
+  "version": "1.0.0",
+  "description": "VoiceShield AI Client SDK for real-time deepfake detection, multi-sample speaker consistency, and fraud prevention.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc"
+  },
+  "keywords": ["voiceshield", "deepfake-detection", "biometrics", "sih2026", "voice-security"],
+  "author": "VoiceShield AI Team",
+  "license": "Apache-2.0"
+}

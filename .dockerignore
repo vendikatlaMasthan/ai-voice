@@ -1,0 +1,41 @@
+# Version control & metadata
+.git
+.gitignore
+.gitattributes
+
+# Environment secrets & credentials
+.env
+.env.*
+.env.local
+.env.production
+
+# Dependencies & virtual environments
+node_modules/
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Build & compilation outputs
+dist/
+dist-ssr/
+build/
+*.tsbuildinfo
+
+# Test & coverage artifacts
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs & temp files
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.system_generated/
+scratch/

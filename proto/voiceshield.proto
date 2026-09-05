@@ -1,0 +1,218 @@
+syntax = "proto3";
+
+package voiceshield;
+
+option go_package = "github.com/voiceshield/voiceshieldai/proto";
+option java_multiple_files = true;
+option java_package = "ai.voiceshield.proto";
+
+// VoiceShield AI — Enterprise High-Performance gRPC Voice Security Service
+service VoiceShieldService {
+  // Evaluates complete audio file for deepfake, prosody, speaker mismatch, and fraud context
+  rpc AnalyzeAudio(AnalyzeAudioRequest) returns (AnalyzeAudioResponse);
+
+  // Enrolls a genuine voice sample into multi-sample cross-session centroid
+  rpc EnrollSpeaker(EnrollSpeakerRequest) returns (EnrollSpeakerResponse);
+
+  // Verifies query audio against enrolled multi-sample centroid
+  rpc VerifySpeaker(VerifySpeakerRequest) returns (VerifySpeakerResponse);
+
+  // Retrieves authoritative organization risk policy and thresholds
+  rpc GetRiskPolicy(GetRiskPolicyRequest) returns (GetRiskPolicyResponse);
+
+  // Bidirectional real-time live streaming voice fraud inspection
+  rpc StreamLiveAudio(stream LiveAudioChunk) returns (stream LiveAudioAnalysisResult);
+}
+
+// ----------------------------------------------------
+// AnalyzeAudio Messages
+// ----------------------------------------------------
+
+message AnalyzeAudioRequest {
+  bytes audio_bytes = 1;
+  string speaker_id = 2;
+  float verification_threshold = 3;
+  string organization_id = 4;
+  string caller_id = 5;
+  string contact_id = 6;
+  string claimed_role = 7;
+  double requested_amount = 8;
+  double normal_amount = 9;
+  string transaction_reference = 10;
+  bool is_urgent = 11;
+  string urgency_reason = 12;
+  string language = 13;
+}
+
+message DeepfakeDetectionResult {
+  string prediction = 1;       // REAL or FAKE
+  float fake_probability = 2;
+  float real_probability = 3;
+  string model_type = 4;
+  float inference_time_ms = 5;
+}
+
+message SpeakerVerificationResult {
+  string status = 1;
+  string speaker_id = 2;
+  float similarity_score = 3;
+  float threshold = 4;
+  bool is_match = 5;
+  int32 speaker_mismatch_flag = 6;
+  int32 sample_count = 7;
+  float inference_time_ms = 8;
+}
+
+message ProsodyAnalysisResult {
+  float score = 1;
+  string status = 2;
+  repeated string reasons = 3;
+  float f0_mean_hz = 4;
+  float f0_std_hz = 5;
+  float jitter_local = 6;
+  float shimmer_local = 7;
+  float hnr_db = 8;
+}
+
+message ASRAnalysisResult {
+  string detected_language = 1;
+  string language_name = 2;
+  float language_confidence = 3;
+  string transcript = 4;
+  repeated string detected_keywords = 5;
+  bool is_language_supported = 6;
+}
+
+message AudioMetadataResult {
+  int32 sample_rate = 1;
+  float original_duration_sec = 2;
+  float processed_duration_sec = 3;
+  float estimated_snr_db = 4;
+  float rms_db = 5;
+}
+
+message AnalyzeAudioResponse {
+  string call_id = 1;
+  int32 risk_score = 2;
+  string risk_level = 3;               // LOW, MEDIUM, HIGH, CRITICAL
+  string recommended_action = 4;        // ALLOW, WARN, SECONDARY_VERIFICATION, HOLD, BLOCK
+  repeated string flags = 5;
+  DeepfakeDetectionResult deepfake_detection = 6;
+  SpeakerVerificationResult speaker_verification = 7;
+  ProsodyAnalysisResult prosody_analysis = 8;
+  ASRAnalysisResult asr_analysis = 9;
+  AudioMetadataResult audio_metadata = 10;
+  string language = 11;
+  string transcript = 12;
+}
+
+// ----------------------------------------------------
+// EnrollSpeaker Messages
+// ----------------------------------------------------
+
+message EnrollSpeakerRequest {
+  bytes audio_bytes = 1;
+  string speaker_id = 2;
+  string speaker_name = 3;
+  string organization_id = 4;
+}
+
+message EnrollSpeakerResponse {
+  string status = 1;
+  string speaker_id = 2;
+  string speaker_name = 3;
+  int32 sample_count = 4;
+  int32 embedding_dimension = 5;
+  double created_at = 6;
+  double updated_at = 7;
+  string message = 8;
+}
+
+// ----------------------------------------------------
+// VerifySpeaker Messages
+// ----------------------------------------------------
+
+message VerifySpeakerRequest {
+  bytes audio_bytes = 1;
+  string speaker_id = 2;
+  float threshold = 3;
+  string organization_id = 4;
+}
+
+message VerifySpeakerResponse {
+  string status = 1;
+  string speaker_id = 2;
+  float similarity_score = 3;
+  float threshold = 4;
+  bool match = 5;
+  int32 speaker_mismatch_flag = 6;
+  int32 sample_count = 7;
+  float inference_time_ms = 8;
+  string message = 9;
+}
+
+// ----------------------------------------------------
+// GetRiskPolicy Messages
+// ----------------------------------------------------
+
+message GetRiskPolicyRequest {
+  string organization_id = 1;
+}
+
+message GetRiskPolicyResponse {
+  string organization_id = 1;
+  string policy_name = 2;
+  float fake_prob_critical_threshold = 3;
+  float fake_prob_warn_threshold = 4;
+  double transaction_auto_hold_amount = 5;
+  double high_risk_wire_threshold = 6;
+  string role_enforcement_strictness = 7;
+  float speaker_verification_strictness = 8;
+  bool independent_callback_required = 9;
+  bool supervisor_escalation_required = 10;
+  bool otp_verification_required = 11;
+  int32 version = 12;
+}
+
+// ----------------------------------------------------
+// StreamLiveAudio Messages
+// ----------------------------------------------------
+
+message LiveAudioContext {
+  string caller_id = 1;
+  string contact_id = 2;
+  string claimed_role = 3;
+  double requested_amount = 4;
+  double normal_amount = 5;
+  bool is_urgent = 6;
+  string urgency_reason = 7;
+  string language = 8;
+}
+
+message LiveAudioChunk {
+  string session_id = 1;
+  bytes pcm16_chunk = 2;       // 16kHz Little-Endian Mono PCM16 raw bytes
+  float window_duration_sec = 3;
+  string speaker_id = 4;
+  float threshold = 5;
+  LiveAudioContext context = 6;
+}
+
+message LiveAudioAnalysisResult {
+  string session_id = 1;
+  int32 window_index = 2;
+  int32 risk_score = 3;
+  string risk_level = 4;
+  string recommended_action = 5;
+  float fake_probability = 6;
+  float real_probability = 7;
+  float speaker_similarity = 8;
+  bool speaker_match = 9;
+  string language = 10;
+  string language_name = 11;
+  float language_confidence = 12;
+  string transcript = 13;
+  repeated string speech_context_flags = 14;
+  repeated string flags = 15;
+  float server_latency_ms = 16;
+}

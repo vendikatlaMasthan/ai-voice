@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv/
+
+# PyTorch / Hugging Face Cache
+.cache/
+huggingface/
+*.pt
+*.bin
+*.onnx
+
+# Testing & Logs
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+
+# OS & Editor Files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Node (preview environment)
+node_modules/
+dist/
+
+# Environment Variables & Secrets
+.env
+.env.*
+!.env.example

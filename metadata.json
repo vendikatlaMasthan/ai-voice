@@ -1,0 +1,10 @@
+{
+  "name": "Remix VoiceShield - AI Voice Cloning \u0026 Fraud Detection",
+  "description": "Foundational audio preprocessing and synthetic voice deepfake detection pipeline for SIH 2026 Problem Statement 26104.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
