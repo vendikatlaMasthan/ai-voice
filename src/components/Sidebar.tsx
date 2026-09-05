@@ -1,120 +1,101 @@
 import React from "react";
 import {
   ShieldCheck,
-  Radio,
-  FileAudio,
-  UserCheck,
-  ShieldAlert,
-  Sliders,
-  Activity,
-  Terminal,
-  ChevronRight,
-  Zap,
-  Lock,
-  Cpu,
-  HelpCircle,
-  ExternalLink
+  LayoutDashboard,
+  UploadCloud,
+  Mic,
+  FileCheck,
+  History,
+  CheckCircle2,
 } from "lucide-react";
-
-export type NavTab = "live" | "analysis" | "speakers" | "policy";
+import { NavTab } from "../types";
 
 interface SidebarProps {
   activeTab: NavTab;
   onTabChange: (tab: NavTab) => void;
-  enrolledCount: number;
-  threatCount?: number;
-  isStreaming?: boolean;
-  isCollapsed?: boolean;
-  onToggleCollapse?: () => void;
+  hasActiveResult: boolean;
+  historyCount: number;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
   activeTab,
   onTabChange,
-  enrolledCount,
-  threatCount = 0,
-  isStreaming = false,
+  hasActiveResult,
+  historyCount,
 }) => {
   const navItems = [
     {
-      id: "live" as NavTab,
-      label: "Live Call Intercept",
-      subtext: "Real-time stream & biometrics",
-      icon: Radio,
-      badge: isStreaming ? "STREAMING" : "LIVE",
-      badgeColor: isStreaming
-        ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/30"
-        : "bg-blue-500/20 text-blue-300 border-blue-500/30",
+      id: "dashboard" as NavTab,
+      label: "Dashboard",
+      subtext: "Overview & summary",
+      icon: LayoutDashboard,
     },
     {
-      id: "analysis" as NavTab,
-      label: "Payload Inspection",
-      subtext: "Single audio file deep scan",
-      icon: FileAudio,
+      id: "upload" as NavTab,
+      label: "Upload Audio",
+      subtext: "Scan recorded voice file",
+      icon: UploadCloud,
     },
     {
-      id: "speakers" as NavTab,
-      label: "Voice Biometrics",
-      subtext: "192-D ECAPA profile store",
-      icon: UserCheck,
-      count: enrolledCount,
+      id: "record" as NavTab,
+      label: "Record Voice",
+      subtext: "Live microphone test",
+      icon: Mic,
     },
+    ...(hasActiveResult
+      ? [
+          {
+            id: "results" as NavTab,
+            label: "Current Result",
+            subtext: "Latest authenticity verdict",
+            icon: FileCheck,
+          },
+        ]
+      : []),
     {
-      id: "policy" as NavTab,
-      label: "Policy Engine",
-      subtext: "Thresholds & step-up routing",
-      icon: Sliders,
+      id: "history" as NavTab,
+      label: "History",
+      subtext: "Past voice checks",
+      icon: History,
+      count: historyCount,
     },
   ];
 
   return (
     <aside
-      id="stitch-sidebar"
-      className="hidden lg:flex flex-col w-64 glass-nav h-screen sticky top-0 z-40 border-r border-white/10 select-none justify-between p-4 overflow-y-auto"
+      id="app-sidebar"
+      className="hidden lg:flex flex-col w-64 bg-slate-950/80 backdrop-blur-md h-screen sticky top-0 z-40 border-r border-slate-800/80 select-none justify-between p-5"
     >
       {/* Brand Header */}
       <div className="space-y-6">
-        <div className="flex items-center gap-3 px-2 py-1">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-600 to-indigo-700 text-white flex items-center justify-center shadow-lg shadow-blue-500/20 border border-white/20 shrink-0">
-            <ShieldCheck className="w-6 h-6 text-emerald-300" />
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-600 to-indigo-600 text-white flex items-center justify-center shadow-md shadow-blue-500/20 shrink-0">
+            <ShieldCheck className="w-6 h-6 text-white" />
           </div>
           <div className="min-w-0">
-            <div className="flex items-center gap-1.5">
-              <span className="text-base font-extrabold text-white tracking-tight font-sans">
-                VoiceShield
-              </span>
-              <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-300 border border-blue-400/30">
-                PRO
-              </span>
-            </div>
-            <p className="text-[10px] text-slate-400 font-mono truncate">
-              SIH 2026 #26104 &bull; SOC Tier-1
-            </p>
-          </div>
-        </div>
-
-        {/* Status Callout Pill */}
-        <div className="glass-panel-darker rounded-xl p-3 border border-white/10 space-y-1.5">
-          <div className="flex items-center justify-between text-[11px]">
-            <span className="text-slate-400 font-mono flex items-center gap-1.5">
-              <span className="relative flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-              </span>
-              Engine Online
+            <span className="text-base font-bold text-white tracking-tight font-sans">
+              VoiceShield
             </span>
-            <span className="text-[10px] font-mono text-emerald-400 font-bold">FP16 CUDA</span>
-          </div>
-          <div className="flex items-center justify-between text-[10px] font-mono text-slate-500">
-            <span>Wav2Vec2 + ECAPA</span>
-            <span>&lt; 350ms</span>
+            <p className="text-[11px] text-slate-400">Voice Safety & Verification</p>
           </div>
         </div>
 
-        {/* Navigation Item List */}
-        <nav className="space-y-1">
-          <div className="px-3 pb-2 text-[10px] font-bold font-mono uppercase tracking-wider text-slate-400">
-            Navigation & Analytics
+        {/* Engine Status Callout */}
+        <div className="rounded-xl bg-slate-900/80 border border-slate-800 p-3 flex items-center justify-between">
+          <div className="flex items-center gap-2 text-xs text-slate-300 font-medium">
+            <span className="relative flex h-2 w-2">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
+            </span>
+            Detection Engine
+          </div>
+          <span className="text-[11px] font-semibold text-emerald-400">Ready</span>
+        </div>
+
+        {/* Navigation List */}
+        <nav className="space-y-1.5 pt-2">
+          <div className="px-3 pb-2 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+            Menu
           </div>
 
           {navItems.map((item) => {
@@ -126,76 +107,46 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 key={item.id}
                 id={`sidebar-nav-${item.id}`}
                 onClick={() => onTabChange(item.id)}
-                className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-left transition-all group squish-btn ${
+                className={`w-full flex items-center justify-between px-3.5 py-3 rounded-xl text-left transition-all ${
                   isActive
-                    ? "bg-gradient-to-r from-blue-600/30 to-indigo-600/20 border border-blue-400/40 text-white shadow-md"
-                    : "text-slate-300 hover:text-white hover:bg-white/5 border border-transparent"
+                    ? "bg-blue-600 text-white font-semibold shadow-sm"
+                    : "text-slate-300 hover:text-white hover:bg-slate-900/60"
                 }`}
               >
                 <div className="flex items-center gap-3 min-w-0">
-                  <div
-                    className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 transition-colors ${
-                      isActive
-                        ? "bg-blue-500 text-white shadow-sm shadow-blue-500/50"
-                        : "bg-white/5 text-slate-400 group-hover:text-blue-400 group-hover:bg-white/10"
-                    }`}
-                  >
-                    <Icon className="w-4 h-4" />
-                  </div>
+                  <Icon className={`w-4 h-4 shrink-0 ${isActive ? "text-white" : "text-slate-400"}`} />
                   <div className="truncate">
-                    <div className="text-xs font-semibold leading-snug">{item.label}</div>
-                    <div className="text-[10px] text-slate-400 truncate">{item.subtext}</div>
+                    <div className="text-xs leading-snug">{item.label}</div>
+                    <div className={`text-[10px] truncate ${isActive ? "text-blue-100" : "text-slate-400"}`}>
+                      {item.subtext}
+                    </div>
                   </div>
                 </div>
 
-                <div className="flex items-center gap-1.5 shrink-0 pl-1">
-                  {item.badge && (
-                    <span
-                      className={`text-[9px] font-mono font-bold px-1.5 py-0.5 rounded-full border ${item.badgeColor}`}
-                    >
-                      {item.badge}
-                    </span>
-                  )}
-                  {item.count !== undefined && (
-                    <span
-                      className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded-full ${
-                        isActive
-                          ? "bg-blue-400/30 text-blue-200"
-                          : "bg-slate-800 text-slate-400 group-hover:text-slate-200"
-                      }`}
-                    >
-                      {item.count}
-                    </span>
-                  )}
-                  {isActive && <ChevronRight className="w-3.5 h-3.5 text-blue-400" />}
-                </div>
+                {item.count !== undefined && item.count > 0 && (
+                  <span
+                    className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${
+                      isActive ? "bg-white/20 text-white" : "bg-slate-800 text-slate-400"
+                    }`}
+                  >
+                    {item.count}
+                  </span>
+                )}
               </button>
             );
           })}
         </nav>
       </div>
 
-      {/* Footer Profile & Security Specs */}
-      <div className="pt-4 border-t border-white/10 space-y-3">
-        <div className="glass-card rounded-xl p-3 flex items-center justify-between border border-white/10">
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-emerald-500 to-cyan-500 flex items-center justify-center text-slate-950 font-bold text-xs shadow-sm">
-              SO
-            </div>
-            <div>
-              <div className="text-xs font-bold text-slate-200">Security Analyst</div>
-              <div className="text-[10px] text-slate-400 font-mono">Org: voice-shield-core</div>
-            </div>
-          </div>
-          <div className="w-2 h-2 rounded-full bg-emerald-400" title="Active Tenant Isolated" />
+      {/* Footer Info */}
+      <div className="pt-4 border-t border-slate-800/80 space-y-2 text-xs text-slate-400">
+        <div className="flex items-center gap-2 text-slate-400">
+          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          <span>Privacy Assured</span>
         </div>
-
-        <div className="flex items-center justify-between px-2 text-[10px] text-slate-500 font-mono">
-          <span>v2.4.0 &bull; Auth-Enforced</span>
-          <span className="text-blue-400/80 hover:text-blue-300 cursor-pointer flex items-center gap-0.5">
-            Docs <ExternalLink className="w-2.5 h-2.5" />
-          </span>
-        </div>
+        <p className="text-[11px] text-slate-500 leading-normal">
+          Audio is evaluated directly in memory and not retained.
+        </p>
       </div>
     </aside>
   );
