@@ -26,10 +26,24 @@ export async function analyzeAudio(
   const formData = new FormData();
   formData.append("file", audioFile, fileName);
 
-  const res = await fetch(`${API_BASE}/api/analyze`, {
-    method: "POST",
-    body: formData,
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 20000); // 20-second client timeout
+
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}/api/analyze`, {
+      method: "POST",
+      body: formData,
+      signal: controller.signal,
+    });
+  } catch (err: any) {
+    if (err.name === "AbortError") {
+      throw new Error("This is taking longer than expected. Please try again.");
+    }
+    throw new Error(err.message || "Failed to connect to VoiceShield service.");
+  } finally {
+    clearTimeout(timeoutId);
+  }
 
   const data = await res.json();
   if (!res.ok) {

@@ -223,7 +223,7 @@ class PythonInferenceDaemonManager {
             },
           });
         }
-      }, 90000); // 90 seconds timeout
+      }, 14000); // 14 seconds maximum inference timeout
 
       this.pendingRequests.set(reqId, { resolve, reject, timer });
 
@@ -644,31 +644,44 @@ const handleAnalyze = async (req: express.Request, res: express.Response) => {
   const standardWavPath = path.join(path.dirname(rawPath), `std_${Date.now()}_${path.basename(rawPath)}.wav`);
 
   try {
-    // 1. Shared Conversion Step: Standardize all audio files (uploaded & recorded) to 16kHz Mono WAV PCM
-    try {
+    const executionPromise = (async () => {
       await convertToStandardWav(rawPath, standardWavPath);
-    } catch (convErr: any) {
-      // Technical log ONLY on server console
-      console.error(`[AudioConversionError] Technical error converting '${rawPath}':`, convErr.message);
+      const params: Record<string, any> = {
+        file: standardWavPath,
+      };
+      return await daemonManager.request("analyze", params);
+    })();
 
-      // Clean plain-language message with NO raw file paths or stack traces
+    const timeoutPromise = new Promise<{ status: number; data: any }>((resolve) => {
+      setTimeout(() => {
+        resolve({
+          status: 504,
+          data: {
+            error_type: "AnalysisTimeoutError",
+            message: "We couldn't complete the analysis in time. Please try a shorter recording or try again.",
+          },
+        });
+      }, 15000); // 15 seconds hard backend ceiling
+    });
+
+    let result: { status: number; data: any };
+    try {
+      result = await Promise.race([executionPromise, timeoutPromise]);
+    } catch (convErr: any) {
+      console.error(`[AudioProcessingError] Technical error processing '${rawPath}':`, convErr.message);
       return res.status(400).json({
         error_type: "AudioProcessingError",
         message: "We couldn't process this audio. Please check the file format or try recording again.",
       });
     }
 
-    const params: Record<string, any> = {
-      file: standardWavPath,
-    };
-
-    const result = await daemonManager.request("analyze", params);
-
     if (result.status !== 200) {
-      console.error(`[DaemonAnalyzeError] Technical error from inference daemon:`, result.data);
+      console.error(`[DaemonAnalyzeError] Technical error from inference daemon (status ${result.status}):`, result.data);
       const rawMsg = String(result.data?.message || "");
       let userMsg = "We couldn't process this audio. Please try recording again.";
-      if (result.data?.error_type === "AudioTooShortError" || rawMsg.includes("short")) {
+      if (result.data?.error_type === "AnalysisTimeoutError") {
+        userMsg = result.data.message;
+      } else if (result.data?.error_type === "AudioTooShortError" || rawMsg.includes("short")) {
         userMsg = "The voice recording is too short. Please speak for at least 1 second.";
       } else if (result.data?.error_type === "AudioSilentError" || rawMsg.includes("silent") || rawMsg.includes("Silence")) {
         userMsg = "No clear voice was detected. Please ensure your microphone is active and speak clearly.";

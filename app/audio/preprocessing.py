@@ -310,6 +310,12 @@ class AudioPreprocessor:
         else:
             normalized_samples = trimmed_samples
 
+        # Cap maximum evaluation window to 15.0 seconds to prevent runaway CPU latency on long recordings
+        max_eval_samples = int(15.0 * self.config.sample_rate)
+        if len(normalized_samples) > max_eval_samples:
+            normalized_samples = normalized_samples[:max_eval_samples]
+            post_trim_duration = 15.0
+
         # 6. Quality Metrics
         final_rms = calculate_rms(normalized_samples)
         final_db = linear_to_db(final_rms)

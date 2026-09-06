@@ -18,6 +18,11 @@ from dataclasses import dataclass, field
 import math
 from typing import Any, Dict, List, Optional, Tuple
 
+try:
+    import numpy as np
+except ImportError:
+    np = None
+
 from app.audio.preprocessing import PreprocessedAudio
 
 
@@ -130,6 +135,7 @@ class ProsodyAnalyzer:
     ) -> Tuple[Optional[float], float]:
         """
         Estimates fundamental frequency (F0) using Normalized Autocorrelation (NACF) with Hanning window.
+        Uses fast vectorized numpy autocorrelation if available.
         Returns:
             Tuple[Optional[float], float]: (F0_hz, peak_autocorr_score)
         """
@@ -137,7 +143,27 @@ class ProsodyAnalyzer:
         if n < max_lag + 2:
             return None, 0.0
 
-        # Apply Hanning window
+        if np is not None:
+            w = np.array(frame, dtype=np.float32) * np.hanning(n).astype(np.float32)
+            energy = float(np.sum(w * w))
+            if energy < 1e-7:
+                return None, 0.0
+            autocorr = np.correlate(w, w, mode="full")[n - 1 :]
+            max_lag_bounded = min(max_lag, len(autocorr) - 1)
+            if min_lag >= max_lag_bounded:
+                return None, 0.0
+            valid_lags = np.arange(min_lag, max_lag_bounded + 1)
+            r_vals = autocorr[valid_lags]
+            norm_r = r_vals / max(1e-9, energy)
+            best_idx = int(np.argmax(norm_r))
+            best_r = float(norm_r[best_idx])
+            best_lag = int(valid_lags[best_idx])
+            if best_r >= voicing_thresh and best_lag > 0:
+                f0_hz = sr / float(best_lag)
+                return f0_hz, best_r
+            return None, best_r
+
+        # Pure Python fallback
         windowed = [
             frame[i] * 0.5 * (1.0 - math.cos(2.0 * math.pi * i / (n - 1)))
             for i in range(n)
@@ -147,7 +173,6 @@ class ProsodyAnalyzer:
         if energy < 1e-7:
             return None, 0.0
 
-        # Autocorrelation for candidate pitch lags
         best_lag = -1
         best_r = -1.0
 
