@@ -17,6 +17,9 @@ export interface AnalysisRecord {
   aiLikelihood: number; // 0 - 100%
   voiceNaturalness: number; // 0 - 100%
   audioClarity: "Clear" | "Moderate" | "Low";
+  detectedLanguage?: string;
+  languageConfidence?: number;
+  uncertainReason?: "mixed_signals" | "low_quality" | "short_audio";
   audioUrl?: string;
   rawResponse?: any;
 }

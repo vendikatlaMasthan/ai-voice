@@ -21,21 +21,33 @@ from app.config import default_config
 
 logger = logging.getLogger("VoiceShield.ASR")
 
-# Supported Indian & Global Languages Mapping
+# Supported 25 Target Languages for VoiceShield Language Identification
 LANGUAGE_NAME_MAP: Dict[str, str] = {
+    "en": "English",
     "hi": "Hindi",
+    "zh": "Mandarin Chinese",
+    "es": "Spanish",
+    "fr": "French",
+    "ar": "Arabic",
+    "bn": "Bengali",
+    "pt": "Portuguese",
+    "ru": "Russian",
+    "ur": "Urdu",
+    "id": "Indonesian",
+    "de": "German",
+    "ja": "Japanese",
+    "mr": "Marathi",
     "te": "Telugu",
+    "tr": "Turkish",
     "ta": "Tamil",
+    "vi": "Vietnamese",
+    "ko": "Korean",
+    "it": "Italian",
+    "gu": "Gujarati",
     "kn": "Kannada",
     "ml": "Malayalam",
-    "bn": "Bengali",
-    "mr": "Marathi",
-    "en": "English",
-    "gu": "Gujarati",
     "pa": "Punjabi",
-    "ur": "Urdu",
     "or": "Odia",
-    "as": "Assamese",
 }
 
 # Multilingual Fraud Keyword Registry (Native Scripts + Romanized Vernacular + English)
@@ -482,60 +494,54 @@ class SpeechRecognizer:
             input_features = inputs.input_features.to(self.device, dtype=self.torch_dtype)
 
             with torch.no_grad():
-                # 1. Real Language Identification via Whisper Encoder
                 lang_code = "unknown"
                 lang_name = "Unknown"
-                lang_confidence = 0.85  # Calibrated baseline for valid speech frame
+                lang_confidence = 0.0
 
                 try:
-                    if hasattr(self.model, "detect_language"):
-                        lang_ids = self.model.detect_language(input_features)
-                        lang_token_id = (
-                            lang_ids[0].item()
-                            if isinstance(lang_ids, torch.Tensor)
-                            else int(lang_ids[0])
-                        )
-                        decoded_token = self.processor.tokenizer.decode(lang_token_id)
-                        # Extract language code from <|en|>, <|hi|>, etc.
-                        clean_code = decoded_token.replace("<|", "").replace("|>", "").strip()
-                        if clean_code:
-                            lang_code = clean_code
-                            lang_name = LANGUAGE_NAME_MAP.get(lang_code, clean_code.upper())
+                    generation_config = self.model.generation_config
+                    decoder_input_ids = (
+                        torch.ones((1, 1), device=self.device, dtype=torch.long)
+                        * generation_config.decoder_start_token_id
+                    )
+                    logits = self.model(
+                        input_features=input_features[:, :, :3000],
+                        decoder_input_ids=decoder_input_ids,
+                        use_cache=False,
+                    ).logits[:, -1]
+
+                    non_lang_mask = torch.ones_like(logits[0], dtype=torch.bool)
+                    non_lang_mask[list(generation_config.lang_to_id.values())] = False
+                    logits[:, non_lang_mask] = -np.inf
+
+                    probs = torch.softmax(logits, dim=-1)
+                    best_id = int(logits.argmax(-1)[0])
+                    lang_confidence = round(float(probs[0, best_id]), 4)
+
+                    decoded_token = self.processor.tokenizer.decode([best_id])
+                    clean_code = decoded_token.replace("<|", "").replace("|>", "").strip()
+                    if clean_code:
+                        lang_code = clean_code
+                        if lang_confidence < 0.50:
+                            lang_name = "Unclear"
+                        elif lang_code in LANGUAGE_NAME_MAP:
+                            lang_name = LANGUAGE_NAME_MAP[lang_code]
+                        else:
+                            lang_name = clean_code.upper()
                 except Exception as lid_err:
                     logger.debug(f"Language detection sub-pass error: {lid_err}")
 
-                # 2. Multilingual ASR Transcription
-                gen_kwargs: Dict[str, Any] = {
-                    "input_features": input_features,
-                    "max_new_tokens": max_new_tokens,
-                }
-                if forced_language:
-                    gen_kwargs["language"] = forced_language
-                elif lang_code and lang_code != "unknown":
-                    gen_kwargs["language"] = lang_code
-
-                predicted_ids = self.model.generate(**gen_kwargs)
-                transcript = self.processor.batch_decode(
-                    predicted_ids,
-                    skip_special_tokens=True,
-                )[0].strip()
-
             inference_ms = (time.perf_counter() - start_time) * 1000.0
 
-            # 3. Extract fraud keywords from transcript
-            keywords, context_flags = self.extract_fraud_keywords(transcript)
-
-            is_valid_speech = bool(transcript and len(transcript) > 1)
-
             return ASRResult(
-                language=lang_code if is_valid_speech else "unknown",
-                language_name=lang_name if is_valid_speech else "Unknown",
-                language_confidence=lang_confidence if is_valid_speech else 0.0,
-                transcript=transcript,
-                is_speech=is_valid_speech,
+                language=lang_code,
+                language_name=lang_name,
+                language_confidence=lang_confidence,
+                transcript="",
+                is_speech=True,
                 inference_time_ms=inference_ms,
-                keywords_detected=keywords,
-                speech_context_flags=context_flags,
+                keywords_detected=[],
+                speech_context_flags=[],
             )
 
         except Exception as e:

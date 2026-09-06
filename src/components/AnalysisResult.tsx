@@ -10,6 +10,7 @@ import {
   Info,
   CheckCircle2,
   XCircle,
+  Globe,
 } from "lucide-react";
 import { AnalysisRecord } from "../types";
 
@@ -72,7 +73,10 @@ export const AnalysisResult: React.FC<AnalysisResultProps> = ({
           cardBorder: "border-yellow-500/40 bg-yellow-950/10",
           icon: HelpCircle,
           iconColor: "text-yellow-400",
-          summary: "The audio quality or vocal characteristics are inconclusive. A clearer sample is recommended for verification.",
+          summary:
+            record.uncertainReason === "mixed_signals"
+              ? "This voice has mixed signals and could not be confidently classified. Treat with caution and verify through another channel."
+              : "The audio quality or vocal characteristics are inconclusive. A clearer sample is recommended for verification.",
         };
     }
   };
@@ -108,6 +112,14 @@ export const AnalysisResult: React.FC<AnalysisResultProps> = ({
                 Inspected: <span className="text-slate-300 font-medium">{record.fileName}</span> &bull; Duration:{" "}
                 <span className="text-slate-300 font-medium">{record.durationSec}s</span>
               </p>
+              {record.detectedLanguage && (
+                <p className="text-xs text-slate-300 mt-1.5 flex items-center gap-1.5 font-medium">
+                  <Globe className="w-3.5 h-3.5 text-blue-400" />
+                  {record.detectedLanguage === "Unclear" || (record.languageConfidence !== undefined && record.languageConfidence < 50)
+                    ? "Language: Unclear"
+                    : `Detected language: ${record.detectedLanguage} (${record.languageConfidence ?? 0}% confidence)`}
+                </p>
+              )}
             </div>
           </div>
 
