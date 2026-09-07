@@ -23,6 +23,7 @@ logger = logging.getLogger("VoiceShield.ASR")
 
 # Supported 25 Target Languages for VoiceShield Language Identification
 LANGUAGE_NAME_MAP: Dict[str, str] = {
+    # 25 Target Languages
     "en": "English",
     "hi": "Hindi",
     "zh": "Mandarin Chinese",
@@ -32,22 +33,32 @@ LANGUAGE_NAME_MAP: Dict[str, str] = {
     "bn": "Bengali",
     "pt": "Portuguese",
     "ru": "Russian",
-    "ur": "Urdu",
-    "id": "Indonesian",
-    "de": "German",
-    "ja": "Japanese",
     "mr": "Marathi",
     "te": "Telugu",
-    "tr": "Turkish",
     "ta": "Tamil",
-    "vi": "Vietnamese",
-    "ko": "Korean",
-    "it": "Italian",
     "gu": "Gujarati",
+    "ur": "Urdu",
     "kn": "Kannada",
+    "or": "Odia",
+    "ori": "Odia",
     "ml": "Malayalam",
     "pa": "Punjabi",
-    "or": "Odia",
+    "as": "Assamese",
+    "mai": "Maithili",
+    "bhi": "Bhili / Bhilodi",
+    "bhilodi": "Bhili / Bhilodi",
+    "sat": "Santali",
+    "ne": "Nepali",
+    "sa": "Sanskrit",
+    "sd": "Sindhi",
+    # Additional global/regional language aliases
+    "de": "German",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "it": "Italian",
+    "tr": "Turkish",
+    "vi": "Vietnamese",
+    "id": "Indonesian",
 }
 
 # Multilingual Fraud Keyword Registry (Native Scripts + Romanized Vernacular + English)
@@ -333,7 +344,12 @@ class SpeechRecognizer:
 
     _instance: Optional["SpeechRecognizer"] = None
 
-    def __init__(self, model_id: str = "openai/whisper-tiny", device: Optional[str] = None):
+    def __init__(self, model_id: Optional[str] = None, device: Optional[str] = None):
+        if model_id is None:
+            model_id = os.getenv(
+                "WHISPER_MODEL_ID",
+                getattr(default_config.model, "whisper_model_name", "openai/whisper-small"),
+            )
         self.model_id = model_id
         self.device = device or ("cuda:0" if torch.cuda.is_available() else "cpu")
         self.torch_dtype = torch.float32  # CPU safe, MX450 safe
@@ -343,7 +359,7 @@ class SpeechRecognizer:
         self.load_time_sec: float = 0.0
 
     @classmethod
-    def get_instance(cls, model_id: str = "openai/whisper-tiny") -> "SpeechRecognizer":
+    def get_instance(cls, model_id: Optional[str] = None) -> "SpeechRecognizer":
         """Singleton accessor for persistent memory reuse."""
         if cls._instance is None:
             cls._instance = SpeechRecognizer(model_id=model_id)
@@ -351,7 +367,7 @@ class SpeechRecognizer:
         return cls._instance
 
     def load_model(self) -> None:
-        """Loads Whisper model weights once into memory."""
+        """Loads Whisper model weights once into memory with graceful fallback."""
         if self.is_loaded:
             return
 
@@ -373,7 +389,28 @@ class SpeechRecognizer:
             self.load_time_sec = time.perf_counter() - t0
             logger.info(f"Whisper model loaded successfully in {self.load_time_sec:.2f}s!")
         except Exception as e:
-            logger.error(f"Failed to load Whisper model: {e}", exc_info=True)
+            logger.warning(
+                f"Failed to load Whisper model '{self.model_id}': {e}. Attempting fallback to 'openai/whisper-tiny'...",
+                exc_info=True,
+            )
+            if self.model_id != "openai/whisper-tiny":
+                try:
+                    from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq
+                    self.model_id = "openai/whisper-tiny"
+                    self.processor = AutoProcessor.from_pretrained(self.model_id)
+                    self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
+                        self.model_id,
+                        dtype=self.torch_dtype,
+                        low_cpu_mem_usage=True,
+                    )
+                    self.model.to(self.device)
+                    self.model.eval()
+                    self.is_loaded = True
+                    self.load_time_sec = time.perf_counter() - t0
+                    logger.info(f"Fallback Whisper-tiny loaded successfully in {self.load_time_sec:.2f}s!")
+                    return
+                except Exception as fallback_err:
+                    logger.error(f"Fallback to Whisper-tiny also failed: {fallback_err}")
             self.is_loaded = False
 
     def extract_fraud_keywords(self, text: str) -> Tuple[List[str], List[str]]:
@@ -519,7 +556,7 @@ class SpeechRecognizer:
                     lang_confidence = round(float(probs[0, best_id]), 4)
 
                     decoded_token = self.processor.tokenizer.decode([best_id])
-                    clean_code = decoded_token.replace("<|", "").replace("|>", "").strip()
+                    clean_code = decoded_token.replace("<|", "").replace("|>", "").strip().lower()
                     if clean_code:
                         lang_code = clean_code
                         if lang_confidence < 0.50:
@@ -531,17 +568,39 @@ class SpeechRecognizer:
                 except Exception as lid_err:
                     logger.debug(f"Language detection sub-pass error: {lid_err}")
 
+                # Optional lightweight transcription generation for fraud keyword extraction
+                transcript = ""
+                if max_new_tokens > 0:
+                    try:
+                        gen_kwargs: Dict[str, Any] = {
+                            "input_features": input_features[:, :, :3000],
+                            "max_new_tokens": max_new_tokens,
+                        }
+                        if forced_language:
+                            gen_kwargs["language"] = forced_language
+                        elif lang_code and lang_code != "unknown":
+                            gen_kwargs["language"] = lang_code
+
+                        predicted_ids = self.model.generate(**gen_kwargs)
+                        transcript = self.processor.batch_decode(
+                            predicted_ids,
+                            skip_special_tokens=True,
+                        )[0].strip()
+                    except Exception as gen_err:
+                        logger.debug(f"Whisper transcription sub-pass error: {gen_err}")
+
             inference_ms = (time.perf_counter() - start_time) * 1000.0
+            keywords, context_flags = self.extract_fraud_keywords(transcript)
 
             return ASRResult(
                 language=lang_code,
                 language_name=lang_name,
                 language_confidence=lang_confidence,
-                transcript="",
+                transcript=transcript,
                 is_speech=True,
                 inference_time_ms=inference_ms,
-                keywords_detected=[],
-                speech_context_flags=[],
+                keywords_detected=keywords,
+                speech_context_flags=context_flags,
             )
 
         except Exception as e:

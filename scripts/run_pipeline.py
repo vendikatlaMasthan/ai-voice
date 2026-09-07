@@ -43,13 +43,7 @@ from app.utils.audio_utils import (
     linear_to_db,
 )
 from app.models.asr import SpeechRecognizer, ASRResult
-from app.models.detector import VoiceCloneDetector
-from app.models.speaker_verifier import (
-    DatabaseSpeakerStore,
-    InMemorySpeakerStore,
-    PretrainedECAPASpeakerVerifier,
-    SpeakerEmbedding,
-)
+from app.models.detector import VoiceCloneDetector, determine_classification
 from app.risk.context import CallContext, resolve_speech_profile
 from app.risk.scoring import VoiceShieldRiskEngine
 from app.risk.verification import SecondaryVerificationStateMachine
@@ -294,52 +288,16 @@ def extract_call_context(args: dict) -> CallContext:
     )
 
 
-def load_persistent_store() -> DatabaseSpeakerStore:
-    """
-    Returns the persistent SQLite database-backed speaker store.
-    Directly persists 192-D biometric vectors with multi-tenant scoping.
-    """
-    return DatabaseSpeakerStore()
-
-
-def save_persistent_store(store: Any):
-    """
-    DatabaseSpeakerStore automatically commits records directly to SQLite.
-    If an in-memory store is passed, saves to file as fallback.
-    """
-    if isinstance(store, DatabaseSpeakerStore):
-        return
-    try:
-        data = {}
-        for spk_id in store.list_speakers():
-            emb = store.get(spk_id)
-            if emb:
-                data[spk_id] = {
-                    "speaker_id": emb.speaker_id,
-                    "embedding": emb.embedding,
-                    "created_at": emb.created_at,
-                    "updated_at": emb.updated_at,
-                    "sample_count": emb.sample_count,
-                    "dimension": emb.dimension,
-                    "metadata": emb.metadata,
-                }
-        with open(SPEAKER_STORE_FILE, "w") as f:
-            json.dump(data, f, indent=2)
-    except Exception as e:
-        sys.stderr.write(f"Warning saving speaker store: {e}\n")
-
-
 def cmd_health():
     res = {
         "status": "ok",
         "service": "VoiceShield API",
-        "version": "1.0.0 (Phase 5)",
+        "version": "1.0.0",
         "supported_models": [
             "garystafford/wav2vec2-deepfake-voice-detector",
-            "speechbrain/spkrec-ecapa-voxceleb",
         ],
         "hardware_profile": "8GB RAM + NVIDIA MX450 / CPU Optimized",
-        "phases_active": [1, 2, 3, 4, 5],
+        "phases_active": [1, 2, 3, 4],
     }
     print(json.dumps(res))
 
@@ -355,9 +313,6 @@ class PipelineWorker:
         self.prosody_analyzer = ProsodyAnalyzer()
         self.detector = VoiceCloneDetector()
         self.detector.load()
-        self.speaker_verifier = PretrainedECAPASpeakerVerifier()
-        self.speaker_verifier.load_model()
-        self.speaker_store = load_persistent_store()
         self.speech_recognizer = SpeechRecognizer.get_instance()
         self.risk_engine = VoiceShieldRiskEngine()
         self.model_load_count = 1
@@ -390,52 +345,36 @@ class PipelineWorker:
             if hasattr(self, "prosody_analyzer") and self.prosody_analyzer is not None:
                 self.prosody_analyzer.analyze(warmup_audio)
 
-            # Warmup SpeakerVerifier embedding path
-            if hasattr(self, "speaker_verifier") and self.speaker_verifier is not None:
-                self.speaker_verifier.extract_embedding(warmup_audio, speaker_id="__warmup__")
-
             # Warmup SpeechRecognizer (Whisper-Tiny)
             if hasattr(self, "speech_recognizer") and self.speech_recognizer is not None:
                 self.speech_recognizer.transcribe(warmup_audio, max_new_tokens=16)
 
             warmup_ms = (time.perf_counter() - t0) * 1000.0
-            sys.stderr.write(f"[PipelineWorker] One-time model warmup (Wav2Vec2 + ECAPA + Whisper) completed in {warmup_ms:.1f}ms.\n")
+            sys.stderr.write(f"[PipelineWorker] One-time model warmup (Wav2Vec2 + Whisper) completed in {warmup_ms:.1f}ms.\n")
         except Exception as err:
             # Fail gracefully without blocking daemon startup
             sys.stderr.write(f"[PipelineWorker:WarmupWarning] Warmup skipped: {err}\n")
 
     def sync_store(self):
-        """Synchronize in-memory speaker store with persistent storage."""
-        self.speaker_store = load_persistent_store()
+        """No-op kept for backwards-compatibility."""
+        pass
 
     def handle_health(self) -> dict:
         return {
             "status": "ok",
             "service": "VoiceShield API",
-            "version": "1.0.0 (Phase 5)",
+            "version": "1.0.0",
             "supported_models": [
                 "garystafford/wav2vec2-deepfake-voice-detector",
-                "speechbrain/spkrec-ecapa-voxceleb",
             ],
             "hardware_profile": "8GB RAM + NVIDIA MX450 / CPU Optimized",
-            "phases_active": [1, 2, 3, 4, 5],
+            "phases_active": [1, 2, 3, 4],
             "persistent_daemon": True,
             "model_load_count": self.model_load_count,
         }
 
     def handle_list_speakers(self) -> dict:
-        self.sync_store()
-        speakers = []
-        for spk_id, emb in self.speaker_store._store.items():
-            speakers.append({
-                "speaker_id": emb.speaker_id,
-                "speaker_name": emb.metadata.get("speaker_name"),
-                "sample_count": emb.sample_count,
-                "dimension": emb.dimension,
-                "created_at": emb.created_at,
-                "updated_at": emb.updated_at,
-            })
-        return {"status": "ok", "speakers": speakers}
+        return {"status": "ok", "speakers": []}
 
     def handle_analyze(self, args: dict) -> dict:
         audio_path = args.get("file")
@@ -471,50 +410,17 @@ class PipelineWorker:
             else float(call_context.speaker_verification_strictness)
         )
 
-        self.sync_store()
         speaker_mismatch_signal = 0
-        speaker_verification_status = "NOT_EVALUATED (No speaker_id supplied)"
+        speaker_verification_status = "NOT_EVALUATED"
         speaker_detail = {
             "status": "NOT_EVALUATED",
             "speaker_id": speaker_id,
             "similarity_score": None,
             "threshold": None,
             "is_match": None,
-            "speaker_mismatch_flag": None,
-            "inference_time_ms": None,
+            "speaker_mismatch_flag": 0,
+            "inference_time_ms": 0.0,
         }
-
-        if speaker_id:
-            enrolled = self.speaker_store.get(speaker_id)
-            if enrolled:
-                ver_res = self.speaker_verifier.verify(
-                    audio=preprocessed,
-                    enrolled_embedding=enrolled,
-                    threshold=effective_speaker_threshold,
-                )
-                speaker_mismatch_signal = ver_res.speaker_mismatch_flag
-                speaker_verification_status = "EVALUATED (MATCH)" if ver_res.is_match else "EVALUATED (MISMATCH)"
-                speaker_detail = {
-                    "status": "EVALUATED",
-                    "speaker_id": speaker_id,
-                    "similarity_score": round(ver_res.similarity_score, 4),
-                    "threshold": round(ver_res.threshold, 4),
-                    "is_match": ver_res.is_match,
-                    "speaker_mismatch_flag": ver_res.speaker_mismatch_flag,
-                    "sample_count": enrolled.sample_count,
-                    "inference_time_ms": round(ver_res.inference_time_ms, 2),
-                }
-            else:
-                speaker_verification_status = f"NOT_ENROLLED (Speaker '{speaker_id}' not found in registry)"
-                speaker_detail = {
-                    "status": "NOT_ENROLLED",
-                    "speaker_id": speaker_id,
-                    "similarity_score": None,
-                    "threshold": None,
-                    "is_match": None,
-                    "speaker_mismatch_flag": None,
-                    "inference_time_ms": None,
-                }
 
         # 4. Local Multilingual Speech Recognition (ASR) & Language Identification
         asr_res = ASRResult()
@@ -562,8 +468,21 @@ class PipelineWorker:
             transcript_language=asr_res.language if asr_res.is_speech else call_context.transcript_language,
         )
 
+        hf_ratio = 0.0
+        if hasattr(prosody_result, "features") and isinstance(prosody_result.features, dict):
+            hf_ratio = float(prosody_result.features.get("hf_energy_ratio", 0.0))
+
+        target_classification = determine_classification(
+            fake_probability=prediction_result.fake_probability,
+            acoustic_anomaly=acoustic_anomaly,
+            snr_db=preprocessed.estimated_snr_db,
+            hf_energy_ratio=hf_ratio,
+        )
+
         return {
             "call_id": call_id,
+            "classification": target_classification,
+            "verdict": target_classification,
             "risk_score": risk_assessment.risk_score,
             "risk_level": risk_assessment.risk_level,
             "verification_session": verification_session.to_dict(),
@@ -578,6 +497,8 @@ class PipelineWorker:
             "asr_analysis": asr_res.to_dict(),
             "deepfake_detection": {
                 "prediction": prediction_result.prediction,
+                "classification": target_classification,
+                "verdict": target_classification,
                 "fake_probability": round(prediction_result.fake_probability, 4),
                 "real_probability": round(prediction_result.real_probability, 4),
                 "model_type": prediction_result.metadata.get("model_type", "Wav2Vec2"),
@@ -774,7 +695,6 @@ class PipelineWorker:
             float(threshold) if threshold is not None and str(threshold).strip() != ""
             else float(call_context.speaker_verification_strictness)
         )
-        self.sync_store()
         speaker_mismatch_signal = 0
         speaker_verification_status = "NOT_EVALUATED"
         speaker_detail = {
@@ -783,41 +703,9 @@ class PipelineWorker:
             "similarity_score": None,
             "threshold": None,
             "is_match": None,
-            "speaker_mismatch_flag": None,
-            "inference_time_ms": None,
+            "speaker_mismatch_flag": 0,
+            "inference_time_ms": 0.0,
         }
-
-        if speaker_id:
-            enrolled = self.speaker_store.get(speaker_id)
-            if enrolled:
-                ver_res = self.speaker_verifier.verify(
-                    audio=preprocessed,
-                    enrolled_embedding=enrolled,
-                    threshold=effective_speaker_threshold,
-                )
-                speaker_mismatch_signal = ver_res.speaker_mismatch_flag
-                speaker_verification_status = "MATCH" if ver_res.is_match else "MISMATCH"
-                speaker_detail = {
-                    "status": "EVALUATED",
-                    "speaker_id": speaker_id,
-                    "similarity_score": round(ver_res.similarity_score, 4),
-                    "threshold": round(ver_res.threshold, 4),
-                    "is_match": ver_res.is_match,
-                    "speaker_mismatch_flag": ver_res.speaker_mismatch_flag,
-                    "sample_count": enrolled.sample_count,
-                    "inference_time_ms": round(ver_res.inference_time_ms, 2),
-                }
-            else:
-                speaker_verification_status = "NOT_ENROLLED"
-                speaker_detail = {
-                    "status": "NOT_ENROLLED",
-                    "speaker_id": speaker_id,
-                    "similarity_score": None,
-                    "threshold": None,
-                    "is_match": None,
-                    "speaker_mismatch_flag": None,
-                    "inference_time_ms": None,
-                }
 
         # 4. Local Multilingual Speech Recognition (ASR) & Language Identification
         asr_res = ASRResult()
@@ -865,8 +753,21 @@ class PipelineWorker:
             transcript_language=asr_res.language if asr_res.is_speech else call_context.transcript_language,
         )
 
+        hf_ratio = 0.0
+        if hasattr(prosody_res, "features") and isinstance(prosody_res.features, dict):
+            hf_ratio = float(prosody_res.features.get("hf_energy_ratio", 0.0))
+
+        stream_classification = determine_classification(
+            fake_probability=prediction_result.fake_probability,
+            acoustic_anomaly=prosody_res.acoustic_anomaly,
+            snr_db=snr_db,
+            hf_energy_ratio=hf_ratio,
+        )
+
         return {
             "call_id": call_id,
+            "classification": stream_classification,
+            "verdict": stream_classification,
             "window_index": args.get("window_index", 0),
             "fake_probability": round(prediction_result.fake_probability, 4),
             "real_probability": round(prediction_result.real_probability, 4),
@@ -903,6 +804,8 @@ class PipelineWorker:
             },
             "deepfake_detection": {
                 "prediction": prediction_result.prediction,
+                "classification": stream_classification,
+                "verdict": stream_classification,
                 "fake_probability": round(prediction_result.fake_probability, 4),
                 "real_probability": round(prediction_result.real_probability, 4),
                 "model_type": prediction_result.metadata.get("model_type", "Wav2Vec2"),
@@ -918,90 +821,6 @@ class PipelineWorker:
             "pipeline_latency_ms": round(total_latency_ms, 2),
         }
 
-    def handle_enroll(self, args: dict) -> dict:
-        audio_path = args.get("file")
-        speaker_id = args.get("speaker_id")
-        speaker_name = args.get("speaker_name")
-
-        if not audio_path or not os.path.exists(audio_path):
-            raise FileNotFoundAudioError(f"Audio file not found: {audio_path}")
-        if not speaker_id:
-            raise ValueError("Field 'speaker_id' is required for enrollment.")
-
-        preprocessed = self.preprocessor.process(audio_path)
-        self.sync_store()
-
-        start_time = time.perf_counter()
-        raw_emb = self.speaker_verifier.extract_embedding(preprocessed, speaker_id=speaker_id)
-
-        sample_meta = {
-            "processed_duration_sec": round(preprocessed.processed_duration_sec, 2),
-            "snr_db": round(preprocessed.estimated_snr_db, 2),
-            "rms_db": round(preprocessed.rms_energy_db, 2),
-        }
-        enrolled = self.speaker_store.enroll_sample(
-            speaker_id=speaker_id,
-            embedding=raw_emb.embedding,
-            speaker_name=speaker_name,
-            sample_metadata=sample_meta,
-        )
-        save_persistent_store(self.speaker_store)
-        total_time_ms = (time.perf_counter() - start_time) * 1000.0
-
-        return {
-            "status": "ENROLLED",
-            "speaker_id": speaker_id,
-            "speaker_name": speaker_name or enrolled.metadata.get("speaker_name"),
-            "sample_count": enrolled.sample_count,
-            "embedding_dimension": enrolled.dimension,
-            "created_at": enrolled.created_at,
-            "updated_at": enrolled.updated_at,
-            "message": f"Speaker '{speaker_id}' sample #{enrolled.sample_count} successfully enrolled ({preprocessed.processed_duration_sec:.2f}s audio processed; multi-sample centroid updated).",
-            "sample_rate_verified": preprocessed.sample_rate,
-            "inference_time_ms": round(total_time_ms, 2),
-        }
-
-    def handle_verify_speaker(self, args: dict) -> dict:
-        audio_path = args.get("file")
-        speaker_id = args.get("speaker_id")
-        threshold = args.get("threshold")
-
-        if not audio_path or not os.path.exists(audio_path):
-            raise FileNotFoundAudioError(f"Audio file not found: {audio_path}")
-
-        self.sync_store()
-        enrolled_embedding = self.speaker_store.get(speaker_id)
-        if not enrolled_embedding:
-            return {
-                "status": 404,
-                "data": {
-                    "error_type": "SpeakerNotEnrolledError",
-                    "message": f"Speaker '{speaker_id}' has not been enrolled. Please enroll reference audio first.",
-                    "status": 404,
-                }
-            }
-
-        preprocessed = self.preprocessor.process(audio_path)
-        ver_result = self.speaker_verifier.verify(
-            audio=preprocessed,
-            enrolled_embedding=enrolled_embedding,
-            threshold=threshold,
-        )
-
-        match_desc = "MATCH (Voice verified)" if ver_result.is_match else "MISMATCH (Voice biometric discrepancy)"
-
-        return {
-            "status": "SUCCESS",
-            "speaker_id": speaker_id,
-            "similarity_score": round(ver_result.similarity_score, 4),
-            "threshold": round(ver_result.threshold, 4),
-            "match": ver_result.is_match,
-            "speaker_mismatch_flag": ver_result.speaker_mismatch_flag,
-            "sample_count": enrolled_embedding.sample_count,
-            "inference_time_ms": round(ver_result.inference_time_ms, 2),
-            "message": f"Verification completed for speaker '{speaker_id}' (against {enrolled_embedding.sample_count}-sample centroid): {match_desc}.",
-        }
-
     def dispatch(self, req: dict) -> dict:
         cmd = req.get("command")
         args = req.get("args", {})
@@ -1010,23 +829,17 @@ class PipelineWorker:
             if cmd == "health":
                 data = self.handle_health()
                 return {"status": 200, "data": data}
-            elif cmd == "list-speakers":
-                data = self.handle_list_speakers()
-                return {"status": 200, "data": data}
             elif cmd == "analyze":
                 data = self.handle_analyze(args)
                 return {"status": 200, "data": data}
             elif cmd in ("stream-chunk", "live-chunk"):
                 data = self.handle_stream_chunk(args)
                 return {"status": 200, "data": data}
-            elif cmd == "enroll":
-                data = self.handle_enroll(args)
-                return {"status": 200, "data": data}
-            elif cmd == "verify-speaker":
-                res = self.handle_verify_speaker(args)
-                if isinstance(res, dict) and "status" in res and isinstance(res["status"], int) and res["status"] != 200:
-                    return res
-                return {"status": 200, "data": res}
+            elif cmd in ("enroll", "verify-speaker", "list-speakers"):
+                return {
+                    "status": 404,
+                    "data": {"error_type": "DeprecatedFeatureError", "message": "Biometric speaker verification has been deprecated."},
+                }
             else:
                 return {
                     "status": 400,
@@ -1122,52 +935,17 @@ def cmd_analyze(args):
         detector.load()
         prediction_result = detector.predict(preprocessed)
 
-        speaker_store = load_persistent_store()
-        speaker_verifier = PretrainedECAPASpeakerVerifier()
-        speaker_verifier.load_model()
-
         speaker_mismatch_signal = 0
-        speaker_verification_status = "NOT_EVALUATED (No speaker_id supplied)"
+        speaker_verification_status = "NOT_EVALUATED"
         speaker_detail = {
             "status": "NOT_EVALUATED",
             "speaker_id": speaker_id,
             "similarity_score": None,
             "threshold": None,
             "is_match": None,
-            "speaker_mismatch_flag": None,
-            "inference_time_ms": None,
+            "speaker_mismatch_flag": 0,
+            "inference_time_ms": 0.0,
         }
-
-        if speaker_id:
-            enrolled = speaker_store.get(speaker_id)
-            if enrolled:
-                ver_res = speaker_verifier.verify(
-                    audio=preprocessed,
-                    enrolled_embedding=enrolled,
-                    threshold=threshold,
-                )
-                speaker_mismatch_signal = ver_res.speaker_mismatch_flag
-                speaker_verification_status = "EVALUATED (MATCH)" if ver_res.is_match else "EVALUATED (MISMATCH)"
-                speaker_detail = {
-                    "status": "EVALUATED",
-                    "speaker_id": speaker_id,
-                    "similarity_score": round(ver_res.similarity_score, 4),
-                    "threshold": round(ver_res.threshold, 4),
-                    "is_match": ver_res.is_match,
-                    "speaker_mismatch_flag": ver_res.speaker_mismatch_flag,
-                    "inference_time_ms": round(ver_res.inference_time_ms, 2),
-                }
-            else:
-                speaker_verification_status = f"NOT_ENROLLED (Speaker '{speaker_id}' not found in registry)"
-                speaker_detail = {
-                    "status": "NOT_ENROLLED",
-                    "speaker_id": speaker_id,
-                    "similarity_score": None,
-                    "threshold": None,
-                    "is_match": None,
-                    "speaker_mismatch_flag": None,
-                    "inference_time_ms": None,
-                }
 
         call_context = extract_call_context(vars(args))
 
@@ -1182,12 +960,27 @@ def cmd_analyze(args):
 
         call_id = f"CALL-{uuid.uuid4().hex[:8].upper()}"
 
+        hf_ratio = 0.0
+        if hasattr(prosody_result, "features") and isinstance(prosody_result.features, dict):
+            hf_ratio = float(prosody_result.features.get("hf_energy_ratio", 0.0))
+
+        target_classification = determine_classification(
+            fake_probability=prediction_result.fake_probability,
+            acoustic_anomaly=acoustic_anomaly,
+            snr_db=preprocessed.estimated_snr_db,
+            hf_energy_ratio=hf_ratio,
+        )
+
         res = {
             "call_id": call_id,
+            "classification": target_classification,
+            "verdict": target_classification,
             "risk_score": risk_assessment.risk_score,
             "risk_level": risk_assessment.risk_level,
             "deepfake_detection": {
                 "prediction": prediction_result.prediction,
+                "classification": target_classification,
+                "verdict": target_classification,
                 "fake_probability": round(prediction_result.fake_probability, 4),
                 "real_probability": round(prediction_result.real_probability, 4),
                 "model_type": prediction_result.metadata.get("model_type", "Wav2Vec2"),
@@ -1238,114 +1031,6 @@ def cmd_analyze(args):
         sys.exit(1)
 
 
-def cmd_enroll(args):
-    audio_path = args.file
-    speaker_id = args.speaker_id
-    speaker_name = args.speaker_name
-
-    try:
-        preprocessor = AudioPreprocessor()
-        preprocessed = preprocessor.process(audio_path)
-
-        speaker_verifier = PretrainedECAPASpeakerVerifier()
-        speaker_verifier.load_model()
-        speaker_store = load_persistent_store()
-
-        start_time = time.perf_counter()
-        embedding = speaker_verifier.extract_embedding(preprocessed, speaker_id=speaker_id)
-        if speaker_name:
-            embedding.metadata["speaker_name"] = speaker_name
-
-        speaker_store.save(embedding)
-        save_persistent_store(speaker_store)
-        total_time_ms = (time.perf_counter() - start_time) * 1000.0
-
-        res = {
-            "status": "ENROLLED",
-            "speaker_id": speaker_id,
-            "speaker_name": speaker_name,
-            "embedding_dimension": embedding.dimension,
-            "message": f"Speaker '{speaker_id}' successfully enrolled ({preprocessed.processed_duration_sec:.2f}s audio processed).",
-            "sample_rate_verified": preprocessed.sample_rate,
-            "inference_time_ms": round(total_time_ms, 2),
-        }
-        print(json.dumps(res))
-    except (AudioTooShortError, AudioTooLongError, AudioSilentError) as err:
-        sys.stderr.write(json.dumps({"error_type": type(err).__name__, "message": str(err), "status": 422}))
-        sys.exit(1)
-    except (AudioCorruptError, UnsupportedFormatError) as err:
-        sys.stderr.write(json.dumps({"error_type": type(err).__name__, "message": str(err), "status": 400}))
-        sys.exit(1)
-    except Exception as err:
-        sys.stderr.write(json.dumps({"error_type": "InferenceError", "message": str(err), "status": 500}))
-        sys.exit(1)
-
-
-def cmd_verify_speaker(args):
-    audio_path = args.file
-    speaker_id = args.speaker_id
-    threshold = args.threshold
-
-    speaker_store = load_persistent_store()
-    enrolled_embedding = speaker_store.get(speaker_id)
-    if not enrolled_embedding:
-        sys.stderr.write(json.dumps({
-            "error_type": "SpeakerNotEnrolledError",
-            "message": f"Speaker '{speaker_id}' has not been enrolled. Please enroll reference audio first.",
-            "status": 404
-        }))
-        sys.exit(1)
-
-    try:
-        preprocessor = AudioPreprocessor()
-        preprocessed = preprocessor.process(audio_path)
-
-        speaker_verifier = PretrainedECAPASpeakerVerifier()
-        speaker_verifier.load_model()
-
-        ver_result = speaker_verifier.verify(
-            audio=preprocessed,
-            enrolled_embedding=enrolled_embedding,
-            threshold=threshold,
-        )
-
-        match_desc = "MATCH (Voice verified)" if ver_result.is_match else "MISMATCH (Voice biometric discrepancy)"
-
-        res = {
-            "status": "SUCCESS",
-            "speaker_id": speaker_id,
-            "similarity_score": round(ver_result.similarity_score, 4),
-            "threshold": round(ver_result.threshold, 4),
-            "match": ver_result.is_match,
-            "speaker_mismatch_flag": ver_result.speaker_mismatch_flag,
-            "inference_time_ms": round(ver_result.inference_time_ms, 2),
-            "message": f"Verification completed for speaker '{speaker_id}': {match_desc}.",
-        }
-        print(json.dumps(res))
-    except (AudioTooShortError, AudioTooLongError, AudioSilentError) as err:
-        sys.stderr.write(json.dumps({"error_type": type(err).__name__, "message": str(err), "status": 422}))
-        sys.exit(1)
-    except (AudioCorruptError, UnsupportedFormatError) as err:
-        sys.stderr.write(json.dumps({"error_type": type(err).__name__, "message": str(err), "status": 400}))
-        sys.exit(1)
-    except Exception as err:
-        sys.stderr.write(json.dumps({"error_type": "InferenceError", "message": str(err), "status": 500}))
-        sys.exit(1)
-
-
-def cmd_list_speakers():
-    speaker_store = load_persistent_store()
-    speakers = []
-    for spk_id, emb in speaker_store._store.items():
-        speakers.append({
-            "speaker_id": emb.speaker_id,
-            "speaker_name": emb.metadata.get("speaker_name"),
-            "dimension": emb.dimension,
-            "created_at": emb.created_at,
-        })
-    print(json.dumps({"status": "ok", "speakers": speakers}))
-
-
 def main():
     parser = argparse.ArgumentParser(description="VoiceShield Pipeline CLI Runner")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1355,9 +1040,6 @@ def main():
 
     # Daemon (Persistent Worker)
     subparsers.add_parser("daemon")
-
-    # List Speakers
-    subparsers.add_parser("list-speakers")
 
     # Analyze
     p_analyze = subparsers.add_parser("analyze")
@@ -1376,33 +1058,16 @@ def main():
     p_analyze.add_argument("--acoustic-anomaly", type=float, default=0.0)
     p_analyze.add_argument("--context", default=None)
 
-    # Enroll
-    p_enroll = subparsers.add_parser("enroll")
-    p_enroll.add_argument("--file", required=True)
-    p_enroll.add_argument("--speaker-id", required=True)
-    p_enroll.add_argument("--speaker-name", default=None)
-
-    # Verify
-    p_verify = subparsers.add_parser("verify-speaker")
-    p_verify.add_argument("--file", required=True)
-    p_verify.add_argument("--speaker-id", required=True)
-    p_verify.add_argument("--threshold", type=float, default=None)
-
     args = parser.parse_args()
 
     if args.command == "health":
         cmd_health()
     elif args.command == "daemon":
         cmd_daemon()
-    elif args.command == "list-speakers":
-        cmd_list_speakers()
     elif args.command == "analyze":
         cmd_analyze(args)
-    elif args.command == "enroll":
-        cmd_enroll(args)
-    elif args.command == "verify-speaker":
-        cmd_verify_speaker(args)
 
 
 if __name__ == "__main__":
     main()
+

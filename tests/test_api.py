@@ -104,26 +104,27 @@ class TestVoiceShieldFastAPIIntegration(unittest.TestCase):
         response = self.client.post("/analyze", files=files)
         self.assertEqual(response.status_code, 400)
 
-    def test_6_post_enroll(self):
-        """6. Test POST /enroll validates audio and returns enrollment receipt."""
-        wav_bytes = self._create_synthetic_wav_bytes(duration_sec=1.5)
-        files = {"file": ("enroll.wav", io.BytesIO(wav_bytes), "audio/wav")}
-        data = {"speaker_id": "USER-4401", "speaker_name": "Bob"}
-        response = self.client.post("/enroll", files=files, data=data)
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertEqual(payload["status"], "ENROLLED")
-        self.assertEqual(payload["speaker_id"], "USER-4401")
+    @patch("app.api.routes.get_detector")
+    def test_6_post_analyze_classification_contract(self, mock_get_detector):
+        """6. Test POST /analyze returns unified classification contract."""
+        mock_detector_instance = MagicMock()
+        mock_detector_instance.predict.return_value = PredictionResult(
+            prediction="FAKE",
+            fake_probability=0.88,
+            real_probability=0.12,
+            metadata={"model_type": "MockWav2Vec2", "model_id": "mock_id"}
+        )
+        mock_get_detector.return_value = mock_detector_instance
 
-    def test_7_post_verify_speaker(self):
-        """7. Test POST /verify-speaker verifies enrolled speaker."""
-        wav_bytes = self._create_synthetic_wav_bytes(duration_sec=1.5)
-        files = {"file": ("verify.wav", io.BytesIO(wav_bytes), "audio/wav")}
-        data = {"speaker_id": "USER-4401"}
-        response = self.client.post("/verify-speaker", files=files, data=data)
+        wav_bytes = self._create_synthetic_wav_bytes(duration_sec=2.0)
+        files = {"file": ("test_speech.wav", io.BytesIO(wav_bytes), "audio/wav")}
+        response = self.client.post("/analyze", files=files)
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertEqual(payload["status"], "SUCCESS")
+        self.assertIn("classification", payload)
+        self.assertEqual(payload["classification"], "SYNTHETIC_AI_GENERATED")
+        self.assertEqual(payload["verdict"], "SYNTHETIC_AI_GENERATED")
+
 
 
 class TestVoiceShieldAPIContracts(unittest.TestCase):

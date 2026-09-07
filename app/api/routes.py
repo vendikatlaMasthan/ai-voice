@@ -20,13 +20,7 @@ from pydantic import BaseModel, Field
 
 from app.audio.preprocessing import AudioPreprocessor
 from app.audio.prosody import ProsodyAnalysisResult, ProsodyAnalyzer
-from app.models.detector import VoiceCloneDetector
-from app.models.speaker_verifier import (
-    BaseSpeakerVerifier,
-    InMemorySpeakerStore,
-    PretrainedECAPASpeakerVerifier,
-    SpeakerVerifierConfig,
-)
+from app.models.detector import VoiceCloneDetector, determine_classification
 from app.risk.context import CallContext
 from app.risk.scoring import VoiceShieldRiskEngine
 from app.utils.audio_utils import (
@@ -45,8 +39,6 @@ _preprocessor: Optional[AudioPreprocessor] = None
 _prosody_analyzer: Optional[ProsodyAnalyzer] = None
 _detector: Optional[VoiceCloneDetector] = None
 _risk_engine: Optional[VoiceShieldRiskEngine] = None
-_speaker_verifier: Optional[BaseSpeakerVerifier] = None
-_speaker_store: Optional[InMemorySpeakerStore] = None
 
 
 def get_preprocessor() -> AudioPreprocessor:
@@ -78,35 +70,21 @@ def get_risk_engine() -> VoiceShieldRiskEngine:
     return _risk_engine
 
 
-def get_speaker_verifier() -> BaseSpeakerVerifier:
-    global _speaker_verifier
-    if _speaker_verifier is None:
-        _speaker_verifier = PretrainedECAPASpeakerVerifier()
-        _speaker_verifier.load_model()
-    return _speaker_verifier
-
-
-def get_speaker_store() -> InMemorySpeakerStore:
-    global _speaker_store
-    if _speaker_store is None:
-        _speaker_store = InMemorySpeakerStore()
-    return _speaker_store
-
-
 # --- Pydantic Response Schemas ---
 
 class HealthResponse(BaseModel):
     status: str = "ok"
     service: str = "VoiceShield API"
-    version: str = "1.0.0 (Phase 5)"
+    version: str = "1.0.0"
     supported_models: List[str] = [
         "garystafford/wav2vec2-deepfake-voice-detector",
-        "speechbrain/spkrec-ecapa-voxceleb",
     ]
 
 
 class DeepfakeResultSchema(BaseModel):
     prediction: str
+    classification: Optional[str] = None
+    verdict: Optional[str] = None
     fake_probability: float
     real_probability: float
     model_type: str
@@ -146,6 +124,8 @@ class RiskSignalsSchema(BaseModel):
 
 class AnalyzeResponse(BaseModel):
     call_id: str
+    classification: str
+    verdict: str
     risk_score: int
     risk_level: str
     deepfake_detection: DeepfakeResultSchema
@@ -155,27 +135,6 @@ class AnalyzeResponse(BaseModel):
     flags: List[str]
     recommended_action: str
     audio_metadata: AudioMetadataSchema
-
-
-class EnrollmentResponse(BaseModel):
-    status: str = "ENROLLED"
-    speaker_id: str
-    speaker_name: Optional[str] = None
-    embedding_dimension: int
-    message: str
-    sample_rate_verified: int
-    inference_time_ms: float
-
-
-class VerifySpeakerResponse(BaseModel):
-    status: str = "SUCCESS"
-    speaker_id: str
-    similarity_score: float
-    threshold: float
-    match: bool
-    speaker_mismatch_flag: int
-    inference_time_ms: float
-    message: str
 
 
 # --- Endpoints ---
@@ -188,10 +147,9 @@ async def health_check():
     return HealthResponse(
         status="ok",
         service="VoiceShield API",
-        version="1.0.0 (Phase 5)",
+        version="1.0.0",
         supported_models=[
             "garystafford/wav2vec2-deepfake-voice-detector",
-            "speechbrain/spkrec-ecapa-voxceleb",
         ],
     )
 
@@ -254,42 +212,17 @@ async def analyze_audio(
         else:
             resolved_acoustic_anomaly = prosody_result.acoustic_anomaly
 
-        # 4. Biometric Speaker Verification (Phase 5)
-        speaker_store = get_speaker_store()
-        speaker_verifier = get_speaker_verifier()
-        
         speaker_mismatch_signal = 0
-        speaker_verification_status = "NOT_EVALUATED (No speaker_id supplied)"
+        speaker_verification_status = "NOT_EVALUATED"
         speaker_detail = SpeakerVerificationDetailSchema(
             status="NOT_EVALUATED",
             speaker_id=speaker_id,
+            similarity_score=None,
+            threshold=None,
+            is_match=None,
+            speaker_mismatch_flag=0,
+            inference_time_ms=0.0,
         )
-
-        if speaker_id:
-            enrolled = speaker_store.get(speaker_id)
-            if enrolled:
-                ver_res = speaker_verifier.verify(
-                    audio=preprocessed,
-                    enrolled_embedding=enrolled,
-                    threshold=verification_threshold,
-                )
-                speaker_mismatch_signal = ver_res.speaker_mismatch_flag
-                speaker_verification_status = "EVALUATED (MATCH)" if ver_res.is_match else "EVALUATED (MISMATCH)"
-                speaker_detail = SpeakerVerificationDetailSchema(
-                    status="EVALUATED",
-                    speaker_id=speaker_id,
-                    similarity_score=round(ver_res.similarity_score, 4),
-                    threshold=round(ver_res.threshold, 4),
-                    is_match=ver_res.is_match,
-                    speaker_mismatch_flag=ver_res.speaker_mismatch_flag,
-                    inference_time_ms=round(ver_res.inference_time_ms, 2),
-                )
-            else:
-                speaker_verification_status = f"NOT_ENROLLED (Speaker '{speaker_id}' not found in registry)"
-                speaker_detail = SpeakerVerificationDetailSchema(
-                    status="NOT_ENROLLED",
-                    speaker_id=speaker_id,
-                )
 
         # 5. Formulate call context for Phase 3 risk engine
         call_context = CallContext(
@@ -316,12 +249,27 @@ async def analyze_audio(
 
         call_id = f"CALL-{uuid.uuid4().hex[:10].upper()}"
 
+        hf_ratio = 0.0
+        if hasattr(prosody_result, "features") and isinstance(prosody_result.features, dict):
+            hf_ratio = float(prosody_result.features.get("hf_energy_ratio", 0.0))
+
+        target_classification = determine_classification(
+            fake_probability=prediction_result.fake_probability,
+            acoustic_anomaly=resolved_acoustic_anomaly,
+            snr_db=preprocessed.estimated_snr_db,
+            hf_energy_ratio=hf_ratio,
+        )
+
         return AnalyzeResponse(
             call_id=call_id,
+            classification=target_classification,
+            verdict=target_classification,
             risk_score=risk_assessment.risk_score,
             risk_level=risk_assessment.risk_level,
             deepfake_detection=DeepfakeResultSchema(
                 prediction=prediction_result.prediction,
+                classification=target_classification,
+                verdict=target_classification,
                 fake_probability=prediction_result.fake_probability,
                 real_probability=prediction_result.real_probability,
                 model_type=prediction_result.metadata.get("model_type", "Wav2Vec2"),
@@ -386,126 +334,3 @@ async def analyze_audio(
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
-
-@router.post("/enroll", response_model=EnrollmentResponse, tags=["Speaker Verification"])
-async def enroll_speaker(
-    file: UploadFile = File(..., description="Reference voice sample (.wav, .flac) of genuine speaker"),
-    speaker_id: str = Form(..., description="Unique speaker identity (e.g. employee ID or user ID)"),
-    speaker_name: Optional[str] = Form(None, description="Full name of genuine speaker"),
-):
-    """
-    Biometric speaker enrollment endpoint.
-    
-    1. Validates audio using 16kHz preprocessing pipeline.
-    2. Extracts 192-D L2-normalized speaker embedding vector (ECAPA-TDNN).
-    3. Securely registers embedding in the speaker profile store. Raw audio is discarded.
-    """
-    if not file or not file.filename:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Missing enrollment audio file.",
-        )
-
-    temp_dir = tempfile.mkdtemp(prefix="voiceshield_enroll_")
-    temp_path = os.path.join(temp_dir, f"enroll_{speaker_id}_{file.filename}")
-
-    try:
-        with open(temp_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-
-        preprocessor = get_preprocessor()
-        preprocessed = preprocessor.process(temp_path)
-
-        speaker_verifier = get_speaker_verifier()
-        speaker_store = get_speaker_store()
-
-        start_time = time.perf_counter()
-        embedding = speaker_verifier.extract_embedding(preprocessed, speaker_id=speaker_id)
-        if speaker_name:
-            embedding.metadata["speaker_name"] = speaker_name
-
-        speaker_store.save(embedding)
-        total_time_ms = (time.perf_counter() - start_time) * 1000.0
-
-        return EnrollmentResponse(
-            status="ENROLLED",
-            speaker_id=speaker_id,
-            speaker_name=speaker_name,
-            embedding_dimension=embedding.dimension,
-            message=f"Speaker '{speaker_id}' successfully enrolled ({preprocessed.processed_duration_sec:.2f}s audio processed).",
-            sample_rate_verified=preprocessed.sample_rate,
-            inference_time_ms=round(total_time_ms, 2),
-        )
-
-    except (AudioTooShortError, AudioSilentError, AudioCorruptError, UnsupportedFormatError) as err:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"error_type": type(err).__name__, "message": str(err)},
-        )
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-
-
-@router.post("/verify-speaker", response_model=VerifySpeakerResponse, tags=["Speaker Verification"])
-async def verify_speaker(
-    file: UploadFile = File(..., description="Query audio sample to verify against enrolled voice profile"),
-    speaker_id: str = Form(..., description="Claimed speaker identity"),
-    threshold: Optional[float] = Form(None, description="Custom similarity decision threshold [0.0 - 1.0]"),
-):
-    """
-    Biometric speaker verification endpoint.
-    
-    Extracts query embedding from uploaded audio and calculates cosine similarity against
-    the enrolled speaker profile.
-    """
-    if not file or not file.filename:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Missing verification audio file.",
-        )
-
-    speaker_store = get_speaker_store()
-    enrolled_embedding = speaker_store.get(speaker_id)
-    if not enrolled_embedding:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Speaker '{speaker_id}' has not been enrolled. Please call /enroll first.",
-        )
-
-    temp_dir = tempfile.mkdtemp(prefix="voiceshield_verify_")
-    temp_path = os.path.join(temp_dir, f"verify_{speaker_id}_{file.filename}")
-
-    try:
-        with open(temp_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-
-        preprocessor = get_preprocessor()
-        preprocessed = preprocessor.process(temp_path)
-
-        speaker_verifier = get_speaker_verifier()
-        ver_result = speaker_verifier.verify(
-            audio=preprocessed,
-            enrolled_embedding=enrolled_embedding,
-            threshold=threshold,
-        )
-
-        match_desc = "MATCH (Voice verified)" if ver_result.is_match else "MISMATCH (Voice biometric discrepancy)"
-
-        return VerifySpeakerResponse(
-            status="SUCCESS",
-            speaker_id=speaker_id,
-            similarity_score=round(ver_result.similarity_score, 4),
-            threshold=round(ver_result.threshold, 4),
-            match=ver_result.is_match,
-            speaker_mismatch_flag=ver_result.speaker_mismatch_flag,
-            inference_time_ms=round(ver_result.inference_time_ms, 2),
-            message=f"Verification completed for speaker '{speaker_id}': {match_desc}.",
-        )
-
-    except (AudioTooShortError, AudioSilentError, AudioCorruptError, UnsupportedFormatError) as err:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"error_type": type(err).__name__, "message": str(err)},
-        )
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)

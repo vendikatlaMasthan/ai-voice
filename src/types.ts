@@ -1,7 +1,7 @@
 export type VerdictType =
   | "GENUINE_LIVE"
   | "REPLAYED_RECORDED"
-  | "SYNTHETIC_AI"
+  | "SYNTHETIC_AI_GENERATED"
   | "UNCERTAIN";
 
 export interface AnalysisRecord {

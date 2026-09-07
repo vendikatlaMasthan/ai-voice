@@ -100,6 +100,15 @@ class PythonInferenceDaemonManager {
       const pythonCmd = getPythonCommand();
       const scriptPath = path.join(process.cwd(), "scripts", "run_pipeline.py");
 
+      let hasResolved = false;
+      const startupTimer = setTimeout(() => {
+        if (!this.isReady && !hasResolved) {
+          console.warn("[PythonDaemonManager] Daemon startup timed out after 10s. Allowing requests to proceed via CLI fallback.");
+          hasResolved = true;
+          resolve();
+        }
+      }, 10000);
+
       console.log(`[PythonDaemonManager] Starting persistent Python daemon with ${pythonCmd}...`);
       const child = spawn(pythonCmd, [scriptPath, "daemon"]);
       this.proc = child;
@@ -108,7 +117,13 @@ class PythonInferenceDaemonManager {
 
       child.stdout.on("data", (chunk: Buffer) => {
         this.stdoutBuffer += chunk.toString("utf-8");
-        this.flushStdoutBuffer(resolve);
+        this.flushStdoutBuffer(() => {
+          clearTimeout(startupTimer);
+          if (!hasResolved) {
+            hasResolved = true;
+            resolve();
+          }
+        });
       });
 
       child.stderr.on("data", (chunk: Buffer) => {
@@ -119,11 +134,13 @@ class PythonInferenceDaemonManager {
       });
 
       child.on("error", (err) => {
+        clearTimeout(startupTimer);
         console.error(`[PythonDaemonManager] Process error:`, err);
         this.handleProcessCrash(err);
       });
 
       child.on("exit", (code, signal) => {
+        clearTimeout(startupTimer);
         console.warn(`[PythonDaemonManager] Process exited with code ${code}, signal ${signal}`);
         this.handleProcessCrash(new Error(`Daemon exited with code ${code}`));
       });
@@ -612,15 +629,24 @@ function convertToStandardWav(inputPath: string, outputPath: string): Promise<vo
     const proc = spawn("ffmpeg", args);
     let stderr = "";
 
+    const ffmpegTimer = setTimeout(() => {
+      try {
+        proc.kill("SIGKILL");
+      } catch {}
+      reject(new Error("Audio conversion timed out after 6 seconds."));
+    }, 6000);
+
     proc.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
     });
 
     proc.on("error", (err) => {
+      clearTimeout(ffmpegTimer);
       reject(new Error(`Failed to spawn ffmpeg: ${err.message}`));
     });
 
     proc.on("close", (code) => {
+      clearTimeout(ffmpegTimer);
       if (code === 0 && fs.existsSync(outputPath) && fs.statSync(outputPath).size > 44) {
         resolve();
       } else {

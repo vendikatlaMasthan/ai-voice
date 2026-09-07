@@ -32,6 +32,9 @@ class ModelConfig:
     # Alternative: "MelodyMachine/Deepfake-audio-detection-V2"
     hf_model_name: str = "garystafford/wav2vec2-deepfake-voice-detector"
     
+    # Multilingual ASR & Spoken Language Identification (Whisper)
+    whisper_model_name: str = os.getenv("WHISPER_MODEL_ID", "openai/whisper-small")
+    
     # Path to local checkpoint or Hugging Face repo ID
     model_name_or_path: str = "garystafford/wav2vec2-deepfake-voice-detector"
     fine_tuned_weights_path: Optional[str] = None
@@ -46,6 +49,10 @@ class ModelConfig:
     
     # Classification decision boundary
     decision_threshold: float = 0.5   # Fake probability >= threshold -> "FAKE"
+    
+    # Tier 1 Reality Defender API Settings (falls back to local model when unavailable)
+    reality_defender_api_key: Optional[str] = os.getenv("REALITY_DEFENDER_API_KEY")
+    reality_defender_timeout_sec: float = 6.0
 
 
 @dataclass

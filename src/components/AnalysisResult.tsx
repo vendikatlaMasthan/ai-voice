@@ -48,7 +48,7 @@ export const AnalysisResult: React.FC<AnalysisResultProps> = ({
           iconColor: "text-emerald-400",
           summary: "This voice shows natural acoustic characteristics consistent with an authentic live human speaker.",
         };
-      case "SYNTHETIC_AI":
+      case "SYNTHETIC_AI_GENERATED":
         return {
           title: "Synthetic AI-Generated Voice",
           badgeColor: "bg-rose-500/20 text-rose-300 border-rose-500/40",

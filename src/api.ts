@@ -27,7 +27,7 @@ export async function analyzeAudio(
   formData.append("file", audioFile, fileName);
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 20000); // 20-second client timeout
+  const timeoutId = setTimeout(() => controller.abort(), 16000); // 16-second client timeout matching backend
 
   let res: Response;
   try {
@@ -74,7 +74,8 @@ export async function analyzeAudio(
     detectedLanguage = "Unclear";
   }
 
-  // Phase 3: Confidence Calibration for Borderline Cases
+  // Unified Classification Contract: GENUINE_LIVE | REPLAYED_RECORDED | SYNTHETIC_AI_GENERATED | UNCERTAIN
+  const backendVerdict = data.classification || data.verdict;
   let verdict: VerdictType = "UNCERTAIN";
   let verdictLabel = "Uncertain";
   let verdictColor: "green" | "red" | "amber" | "yellow" = "yellow";
@@ -82,54 +83,55 @@ export async function analyzeAudio(
   let recommendedAction = "Inconclusive audio — please obtain a clearer voice sample.";
   let uncertainReason: "mixed_signals" | "low_quality" | "short_audio" | undefined = undefined;
 
-  // 1. Definite Synthetic Voice
-  if (fakeProb >= 0.65) {
-    verdict = "SYNTHETIC_AI";
+  // Derive verdict based on authoritative backend classification or calibrated multi-signal fallback
+  const targetVerdict = (
+    backendVerdict === "GENUINE_LIVE" ||
+    backendVerdict === "REPLAYED_RECORDED" ||
+    backendVerdict === "SYNTHETIC_AI_GENERATED" ||
+    backendVerdict === "UNCERTAIN"
+  )
+    ? backendVerdict
+    : fakeProb >= 0.65
+    ? "SYNTHETIC_AI_GENERATED"
+    : snr < 10
+    ? "UNCERTAIN"
+    : (anomaly >= 0.65 && fakeProb < 0.35 && hfRatio < 0.60)
+    ? "REPLAYED_RECORDED"
+    : (
+        (aiLikelihood >= 35 && aiLikelihood <= 65) ||
+        (voiceNaturalness >= 40 && voiceNaturalness <= 60 && hfRatio >= 0.60) ||
+        (voiceNaturalness >= 40 && voiceNaturalness <= 60 && aiLikelihood >= 40 && aiLikelihood <= 60)
+      )
+    ? "UNCERTAIN"
+    : (fakeProb < 0.35 && voiceNaturalness > 50 && snr >= 12 && hfRatio < 0.60)
+    ? "GENUINE_LIVE"
+    : "UNCERTAIN";
+
+  if (targetVerdict === "SYNTHETIC_AI_GENERATED") {
+    verdict = "SYNTHETIC_AI_GENERATED";
     verdictLabel = "Synthetic AI-Generated";
     verdictColor = "red";
     explanation = "This audio exhibits digital synthesis artifacts typical of AI voice cloning models.";
     recommendedAction = "This voice appears synthetic — verify before trusting it.";
-  }
-  // 2. Low Quality / Noisy Audio
-  else if (snr < 10) {
-    verdict = "UNCERTAIN";
-    verdictLabel = "Uncertain";
-    verdictColor = "yellow";
-    uncertainReason = "low_quality";
-    explanation = "The audio recording quality or signal-to-noise ratio is too low for a reliable classification.";
-    recommendedAction = "Inconclusive audio — please obtain a clearer voice sample.";
-  }
-  // 3. Replayed Audio (Loudspeaker coloration, high room reverberation)
-  else if (anomaly >= 0.65 && fakeProb < 0.35 && hfRatio < 0.60) {
+  } else if (targetVerdict === "REPLAYED_RECORDED") {
     verdict = "REPLAYED_RECORDED";
     verdictLabel = "Replayed-Recorded";
     verdictColor = "amber";
     explanation = "Acoustic signatures suggest audio played back through a loudspeaker or re-recorded with room acoustics.";
     recommendedAction = "This voice appears to be a recording played through a speaker — verify identity.";
-  }
-  // 4. Borderline / Close-Call / Mixed Signals
-  // Triggered when both scores are in the close-call zone (40-60%),
-  // or when naturalness is in the borderline zone (40-60%) with vocoder distortions (hfRatio >= 0.60),
-  // or synthetic score is in borderline range (35-65%).
-  else if (
-    (aiLikelihood >= 35 && aiLikelihood <= 65) ||
-    (voiceNaturalness >= 40 && voiceNaturalness <= 60 && hfRatio >= 0.60) ||
-    (voiceNaturalness >= 40 && voiceNaturalness <= 60 && aiLikelihood >= 40 && aiLikelihood <= 60)
-  ) {
-    verdict = "UNCERTAIN";
-    verdictLabel = "Uncertain";
-    verdictColor = "yellow";
-    uncertainReason = "mixed_signals";
-    explanation = "This voice has mixed signals and could not be confidently classified. Treat with caution and verify through another channel.";
-    recommendedAction = "Treat with caution and verify through another channel.";
-  }
-  // 5. Genuine Live Voice
-  else if (fakeProb < 0.35 && voiceNaturalness > 50 && snr >= 12 && hfRatio < 0.60) {
+  } else if (targetVerdict === "GENUINE_LIVE") {
     verdict = "GENUINE_LIVE";
     verdictLabel = "Genuine Live";
     verdictColor = "green";
     explanation = "Natural vocal variations, pauses, and acoustics characteristic of an authentic live human speaker.";
     recommendedAction = "This voice appears genuine — no action needed.";
+  } else {
+    verdict = "UNCERTAIN";
+    verdictLabel = "Uncertain";
+    verdictColor = "yellow";
+    uncertainReason = snr < 10 ? "low_quality" : "mixed_signals";
+    explanation = "This voice has mixed signals and could not be confidently classified. Treat with caution and verify through another channel.";
+    recommendedAction = "Inconclusive audio — please obtain a clearer voice sample.";
   }
 
   let audioUrl: string | undefined = undefined;

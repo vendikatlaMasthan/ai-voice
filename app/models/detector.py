@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from app.audio.preprocessing import PreprocessedAudio
 from app.config import ModelConfig, default_config
+from app.models.reality_defender import RealityDefenderClient
 
 
 @dataclass
@@ -24,15 +25,49 @@ class PredictionResult:
     fake_probability: float    # Probability score [0.0, 1.0] that speech is synthetic/cloned
     real_probability: float    # Probability score [0.0, 1.0] that speech is genuine human
     metadata: Dict[str, Any]   # Device, model identifier, latency, and quality diagnostics
+    classification: str = "UNCERTAIN"
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert result to dictionary representation."""
         return {
             "prediction": self.prediction,
+            "classification": self.classification,
+            "verdict": self.classification,
             "fake_probability": round(self.fake_probability, 4),
             "real_probability": round(self.real_probability, 4),
             "metadata": self.metadata
         }
+
+
+def determine_classification(
+    fake_probability: float,
+    acoustic_anomaly: float = 0.0,
+    snr_db: float = 15.0,
+    hf_energy_ratio: float = 0.0,
+) -> str:
+    """
+    Unified Classification Contract:
+    GENUINE_LIVE | REPLAYED_RECORDED | SYNTHETIC_AI_GENERATED | UNCERTAIN
+    """
+    ai_likelihood = round(fake_probability * 100)
+    naturalness = round(max(0.0, min(1.0, 1.0 - acoustic_anomaly)) * 100)
+
+    if fake_probability >= 0.65:
+        return "SYNTHETIC_AI_GENERATED"
+    elif snr_db < 10:
+        return "UNCERTAIN"
+    elif acoustic_anomaly >= 0.65 and fake_probability < 0.35 and hf_energy_ratio < 0.60:
+        return "REPLAYED_RECORDED"
+    elif (
+        (35 <= ai_likelihood <= 65)
+        or (40 <= naturalness <= 60 and hf_energy_ratio >= 0.60)
+        or (40 <= naturalness <= 60 and 40 <= ai_likelihood <= 60)
+    ):
+        return "UNCERTAIN"
+    elif fake_probability < 0.35 and naturalness > 50 and snr_db >= 12 and hf_energy_ratio < 0.60:
+        return "GENUINE_LIVE"
+    else:
+        return "UNCERTAIN"
 
 
 class BaseVoiceDetector(ABC):
@@ -366,8 +401,10 @@ class BaselineSpectralDetector(BaseVoiceDetector):
 
 class VoiceCloneDetector:
     """
-    High-Level Voice Clone & Deepfake Detector Facade.
-    Coordinates audio preprocessing, device selection, model lifecycle, and result compilation.
+    Tiered Voice Clone & Deepfake Detector:
+    - Tier 1: Reality Defender API (Primary, when API key is configured)
+    - Tier 2: Local Hugging Face Wav2Vec2 (Automatic fallback on failure, timeout, quota exhaustion, or unconfigured)
+    - Tier 3: Baseline Spectral Detector (Deterministic structural fallback)
     """
 
     def __init__(
@@ -378,6 +415,10 @@ class VoiceCloneDetector:
         self.config = config or default_config.model
         self.use_dl = use_deep_learning_backend
         self.detector: BaseVoiceDetector
+        self.reality_defender = RealityDefenderClient(
+            api_key=getattr(self.config, "reality_defender_api_key", None),
+            timeout_sec=getattr(self.config, "reality_defender_timeout_sec", 6.0),
+        )
 
         # Select backend: Transformer if requested and dependencies exist, else Baseline
         if self.use_dl:
@@ -395,6 +436,47 @@ class VoiceCloneDetector:
         """Explicit model loader."""
         self.detector.load_model()
 
-    def predict(self, preprocessed_audio: PreprocessedAudio) -> PredictionResult:
-        """Run prediction on preprocessed audio."""
-        return self.detector.predict(preprocessed_audio)
+    def predict(
+        self, preprocessed_audio: PreprocessedAudio, audio_path: Optional[str] = None
+    ) -> PredictionResult:
+        """
+        Run prediction with strict detection tier order:
+        Reality Defender (Tier 1) -> Local Wav2Vec2 (Tier 2 Fallback) -> Baseline Spectral (Tier 3)
+        """
+        # Tier 1: Reality Defender API
+        if self.reality_defender.is_configured:
+            ok, rd_result, state = self.reality_defender.predict(
+                preprocessed_audio, audio_path=audio_path
+            )
+            if ok and rd_result is not None:
+                return PredictionResult(
+                    prediction=rd_result["prediction"],
+                    fake_probability=rd_result["fake_probability"],
+                    real_probability=rd_result["real_probability"],
+                    metadata={
+                        **rd_result,
+                        "detection_tier": "TIER_1_REALITY_DEFENDER",
+                        "audio_duration_sec": preprocessed_audio.processed_duration_sec,
+                        "sample_rate": preprocessed_audio.sample_rate,
+                    },
+                )
+            print(
+                f"[VoiceCloneDetector] Reality Defender skipped/failed ({state}). "
+                f"Falling back automatically to local Wav2Vec2 model."
+            )
+
+        # Tier 2: Local Transformer Model
+        try:
+            local_res = self.detector.predict(preprocessed_audio)
+            local_res.metadata["detection_tier"] = "TIER_2_LOCAL_WAV2VEC2_FALLBACK"
+            return local_res
+        except Exception as err:
+            print(
+                f"[VoiceCloneDetector] Local model inference error ({err}). "
+                f"Falling back to Tier 3 BaselineSpectralDetector."
+            )
+            baseline = BaselineSpectralDetector(self.config)
+            baseline.load_model()
+            base_res = baseline.predict(preprocessed_audio)
+            base_res.metadata["detection_tier"] = "TIER_3_BASELINE_SPECTRAL_FALLBACK"
+            return base_res
