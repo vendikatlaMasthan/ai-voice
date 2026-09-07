@@ -15,7 +15,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 }) => {
   const totalScans = history.length;
   const genuineCount = history.filter((h) => h.verdict === "GENUINE_LIVE").length;
-  const syntheticCount = history.filter((h) => h.verdict === "SYNTHETIC_AI").length;
+  const syntheticCount = history.filter((h) => h.verdict === "SYNTHETIC_AI_GENERATED").length;
   const uncertainCount = history.filter(
     (h) => h.verdict === "UNCERTAIN" || h.verdict === "REPLAYED_RECORDED"
   ).length;
@@ -30,7 +30,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             🟢 Genuine Live
           </span>
         );
-      case "SYNTHETIC_AI":
+      case "SYNTHETIC_AI_GENERATED":
         return (
           <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-rose-500/15 text-rose-300 border border-rose-500/30">
             🔴 Synthetic AI

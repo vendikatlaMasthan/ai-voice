@@ -48,12 +48,15 @@ export const UploadView: React.FC<UploadViewProps> = ({
   const handleSelectSample = async (sample: SampleAudio) => {
     try {
       const res = await fetch(sample.url);
+      if (!res.ok) {
+        throw new Error(`Could not load sample audio (HTTP ${res.status})`);
+      }
       const blob = await res.blob();
-      const file = new File([blob], sample.filename, { type: "audio/wav" });
+      const file = new File([blob], sample.filename, { type: blob.type || "audio/wav" });
       setSelectedFile(file);
       setSelectedSampleName(sample.filename);
       if (audioPreviewUrl) URL.revokeObjectURL(audioPreviewUrl);
-      setAudioPreviewUrl(sample.url);
+      setAudioPreviewUrl(URL.createObjectURL(blob));
       setIsPlaying(false);
     } catch (err) {
       console.error("Failed to load sample:", err);
