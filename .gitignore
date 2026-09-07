@@ -36,6 +36,7 @@ dist/
 .env
 .env.*
 !.env.example
+!.env.production
 
 # Local SQLite databases
 data/*.db*
