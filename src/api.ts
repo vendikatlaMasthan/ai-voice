@@ -35,10 +35,8 @@ const BUILTIN_SAMPLES: SampleAudio[] = [
 async function parseJsonSafely(res: Response): Promise<any> {
   const contentType = res.headers.get("content-type") || "";
   if (!contentType.includes("application/json")) {
-    const rawSnippet = await res.text().catch(() => "");
-    throw new Error(
-      `Backend responded with non-JSON content (${contentType || "text/plain"}, HTTP ${res.status}): ${rawSnippet.slice(0, 100)}`
-    );
+    await res.text().catch(() => "");
+    throw new Error("We couldn't process this audio. The server returned an unexpected response.");
   }
   return res.json();
 }
@@ -116,24 +114,46 @@ export async function analyzeAudio(
     });
   } catch (err: any) {
     clearTimeout(timeoutId);
-    if (err.name === "AbortError") {
+    console.error("[VoiceShield Technical Error]:", err);
+    if (err.name === "AbortError" || err.message?.includes("timed out")) {
       throw new Error("Analysis timed out. The backend model is taking longer than expected.");
     }
+    const raw = String(err.message || "");
+    if (
+      raw &&
+      !raw.includes("0x") &&
+      !raw.includes("object at") &&
+      !raw.includes("<_io") &&
+      !raw.includes("TypeError") &&
+      !raw.includes("Failed to fetch")
+    ) {
+      throw new Error(raw);
+    }
     const backendHint = API_BASE
-      ? `Cannot reach backend at ${API_BASE}. Please verify your backend server is running and accessible.`
-      : "Backend URL is not configured. Please ensure VITE_API_URL is set in your environment.";
+      ? `Cannot reach backend at ${API_BASE}. Please verify your backend server is running.`
+      : "Backend service is not reachable. Please check your connection.";
     throw new Error(backendHint);
   } finally {
     clearTimeout(timeoutId);
   }
 
   if (!res.ok) {
-    let errorDetail = `Backend inference failed (HTTP ${res.status})`;
+    let errorDetail = "We couldn't process this audio. Please try again.";
     try {
       const errJson = await parseJsonSafely(res);
-      errorDetail = errJson.detail || errJson.message || errorDetail;
+      const rawMsg = String(errJson.detail || errJson.message || "");
+      if (
+        rawMsg &&
+        !rawMsg.includes("0x") &&
+        !rawMsg.includes("object at") &&
+        !rawMsg.includes("<_io") &&
+        !rawMsg.includes("Traceback") &&
+        !rawMsg.includes("SyntaxError")
+      ) {
+        errorDetail = rawMsg;
+      }
     } catch {
-      // Keep default errorDetail
+      // Use user-friendly fallback
     }
     throw new Error(errorDetail);
   }
