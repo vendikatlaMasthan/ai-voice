@@ -1,6 +1,7 @@
 export type VerdictType =
   | "GENUINE_LIVE"
   | "REPLAYED_RECORDED"
+  | "SYNTHETIC_AI"
   | "SYNTHETIC_AI_GENERATED"
   | "UNCERTAIN";
 
@@ -8,18 +9,16 @@ export interface AnalysisRecord {
   id: string;
   timestamp: number;
   fileName: string;
-  durationSec: number;
+  durationSec?: number;
   verdict: VerdictType;
   verdictLabel: string;
   verdictColor: "green" | "red" | "amber" | "yellow";
   explanation: string;
   recommendedAction: string;
-  aiLikelihood: number; // 0 - 100%
-  voiceNaturalness: number; // 0 - 100%
-  audioClarity: "Clear" | "Moderate" | "Low";
-  detectedLanguage?: string;
-  languageConfidence?: number;
-  uncertainReason?: "mixed_signals" | "low_quality" | "short_audio";
+  aiLikelihood: number; // 0 - 100% (from spoof_probability)
+  spoofProbability: number;
+  bonafideProbability?: number;
+  modelName: string; // "AASIST"
   audioUrl?: string;
   rawResponse?: any;
 }
@@ -32,8 +31,9 @@ export interface SampleAudio {
 
 export interface HealthResponse {
   status: string;
-  service: string;
-  version: string;
+  model: string;
+  device?: string;
+  weights_loaded?: boolean;
 }
 
 export type NavTab = "dashboard" | "upload" | "record" | "results" | "history";
