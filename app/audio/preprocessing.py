@@ -185,6 +185,8 @@ class AudioPreprocessor:
         # Check 1: Initial duration check
         if original_duration < self.config.min_duration_sec:
             raise AudioTooShortError(original_duration, self.config.min_duration_sec)
+        if original_duration > 15.5:
+            logger.info(f"[Preprocessing] Audio duration {original_duration:.2f}s exceeds 15s window. Windowing to speech segment.")
 
         # 2. Resample to target sample rate (16kHz)
         samples_16k = self.resample(raw_samples, original_sr, self.config.sample_rate)

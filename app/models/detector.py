@@ -27,6 +27,16 @@ class PredictionResult:
     metadata: Dict[str, Any]   # Device, model identifier, latency, and quality diagnostics
     classification: str = "UNCERTAIN"
 
+    @property
+    def is_synthetic(self) -> bool:
+        """True if the prediction verdict is FAKE."""
+        return self.prediction == "FAKE"
+
+    @property
+    def detection_source(self) -> str:
+        """Extract the model or tier that produced this prediction."""
+        return self.metadata.get("detection_source", self.metadata.get("model_type", "unknown"))
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert result to dictionary representation."""
         return {
@@ -35,6 +45,7 @@ class PredictionResult:
             "verdict": self.classification,
             "fake_probability": round(self.fake_probability, 4),
             "real_probability": round(self.real_probability, 4),
+            "detection_source": self.detection_source,
             "metadata": self.metadata
         }
 

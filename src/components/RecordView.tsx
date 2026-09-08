@@ -1,11 +1,30 @@
 import React, { useState, useRef, useEffect } from "react";
-import { Mic, Square, Play, Pause, RotateCcw, Sparkles, Loader2, AlertCircle } from "lucide-react";
+import {
+  Mic,
+  Square,
+  Play,
+  Pause,
+  RotateCcw,
+  ShieldCheck,
+  Loader2,
+  AlertCircle,
+  Globe,
+  Radio,
+} from "lucide-react";
 
 interface RecordViewProps {
   onAnalyze: (file: File | Blob, name: string) => Promise<void>;
   isProcessing: boolean;
   error: string | null;
 }
+
+type LiveMicState =
+  | "idle"
+  | "listening"
+  | "speech_detected"
+  | "detecting_language"
+  | "analyzing_voice"
+  | "analysis_complete";
 
 export const RecordView: React.FC<RecordViewProps> = ({
   onAnalyze,
@@ -18,21 +37,39 @@ export const RecordView: React.FC<RecordViewProps> = ({
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [permissionError, setPermissionError] = useState<string | null>(null);
+  const [currentState, setCurrentState] = useState<LiveMicState>("idle");
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<any>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const stageTimerRef = useRef<any>(null);
 
   useEffect(() => {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
+      if (stageTimerRef.current) clearTimeout(stageTimerRef.current);
       if (audioUrl) URL.revokeObjectURL(audioUrl);
       if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
         mediaRecorderRef.current.stop();
       }
     };
   }, [audioUrl]);
+
+  // Manage stage progression during isProcessing
+  useEffect(() => {
+    if (isProcessing) {
+      setCurrentState("detecting_language");
+      stageTimerRef.current = setTimeout(() => {
+        setCurrentState("analyzing_voice");
+      }, 1500);
+    } else {
+      if (stageTimerRef.current) clearTimeout(stageTimerRef.current);
+      if (currentState === "analyzing_voice") {
+        setCurrentState("analysis_complete");
+      }
+    }
+  }, [isProcessing]);
 
   const startRecording = async () => {
     setPermissionError(null);
@@ -43,6 +80,7 @@ export const RecordView: React.FC<RecordViewProps> = ({
     }
     audioChunksRef.current = [];
     setRecordingTime(0);
+    setCurrentState("listening");
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -51,7 +89,9 @@ export const RecordView: React.FC<RecordViewProps> = ({
         : MediaRecorder.isTypeSupported("audio/webm")
         ? "audio/webm"
         : "";
-      const mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+      const mediaRecorder = mimeType
+        ? new MediaRecorder(stream, { mimeType })
+        : new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
 
       mediaRecorder.ondataavailable = (event) => {
@@ -65,7 +105,6 @@ export const RecordView: React.FC<RecordViewProps> = ({
         const audioBlob = new Blob(audioChunksRef.current, { type: actualMime });
         setRecordedBlob(audioBlob);
         setAudioUrl(URL.createObjectURL(audioBlob));
-        // Stop all tracks
         stream.getTracks().forEach((track) => track.stop());
       };
 
@@ -73,12 +112,20 @@ export const RecordView: React.FC<RecordViewProps> = ({
       setIsRecording(true);
 
       timerRef.current = setInterval(() => {
-        setRecordingTime((prev) => prev + 1);
+        setRecordingTime((prev) => {
+          const next = prev + 1;
+          if (next >= 1) {
+            setCurrentState("speech_detected");
+          }
+          return next;
+        });
       }, 1000);
     } catch (err: any) {
       console.error("Microphone access error:", err);
+      setCurrentState("idle");
       setPermissionError(
-        err.message || "Microphone access denied. Please enable microphone permissions in your browser."
+        err.message ||
+          "Microphone access was denied. Please enable microphone permissions in your browser."
       );
     }
   };
@@ -95,6 +142,7 @@ export const RecordView: React.FC<RecordViewProps> = ({
     setIsRecording(false);
     setRecordedBlob(null);
     setRecordingTime(0);
+    setCurrentState("idle");
     if (audioUrl) {
       URL.revokeObjectURL(audioUrl);
       setAudioUrl(null);
@@ -115,8 +163,12 @@ export const RecordView: React.FC<RecordViewProps> = ({
 
   const handleAnalyzeRecordedVoice = async () => {
     if (!recordedBlob) return;
+    if (recordingTime < 1) {
+      setPermissionError("Recording is too short. Please speak for at least 1 second.");
+      return;
+    }
     const ext = recordedBlob.type.includes("mp4") ? "m4a" : "webm";
-    const file = new File([recordedBlob], `microphone_recording_${Date.now()}.${ext}`, {
+    const file = new File([recordedBlob], `mic_recording_${Date.now()}.${ext}`, {
       type: recordedBlob.type || "audio/webm",
     });
     await onAnalyze(file, file.name);
@@ -128,17 +180,62 @@ export const RecordView: React.FC<RecordViewProps> = ({
     return `${mins.toString().padStart(2, "0")}:${remainingSec.toString().padStart(2, "0")}`;
   };
 
+  const getStateBadge = () => {
+    switch (currentState) {
+      case "listening":
+        return (
+          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-blue-500/20 text-blue-300 border border-blue-500/40">
+            <span className="w-2 h-2 rounded-full bg-blue-400 animate-ping" />
+            Listening...
+          </span>
+        );
+      case "speech_detected":
+        return (
+          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+            <span className="w-2 h-2 rounded-full bg-emerald-400" />
+            Speech detected...
+          </span>
+        );
+      case "detecting_language":
+        return (
+          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-purple-500/20 text-purple-300 border border-purple-500/40">
+            <Globe className="w-3.5 h-3.5 text-purple-400 animate-spin" />
+            Detecting language...
+          </span>
+        );
+      case "analyzing_voice":
+        return (
+          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-indigo-500/20 text-indigo-300 border border-indigo-500/40">
+            <Loader2 className="w-3.5 h-3.5 text-indigo-400 animate-spin" />
+            Analyzing voice...
+          </span>
+        );
+      case "analysis_complete":
+        return (
+          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+            <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+            Analysis complete.
+          </span>
+        );
+      case "idle":
+      default:
+        return null;
+    }
+  };
+
   return (
     <div className="max-w-3xl mx-auto space-y-8">
       {/* Title */}
       <div>
-        <h1 className="text-2xl sm:text-3xl font-bold text-white tracking-tight">Record Voice Sample</h1>
+        <h1 className="text-2xl sm:text-3xl font-bold text-white tracking-tight">
+          Live Microphone Verification
+        </h1>
         <p className="text-sm text-slate-400 mt-1">
-          Speak into your microphone for 3 to 10 seconds to verify whether your voice is identified as live human speech.
+          Capture live voice to detect language and test for synthetic cloning or deepfake voice synthesis.
         </p>
       </div>
 
-      {/* Permission / General Error */}
+      {/* Permission / Notice */}
       {(permissionError || error) && (
         <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-sm flex items-start gap-3">
           <AlertCircle className="w-5 h-5 shrink-0 text-rose-400 mt-0.5" />
@@ -149,14 +246,19 @@ export const RecordView: React.FC<RecordViewProps> = ({
         </div>
       )}
 
-      {/* Recorder Center Card */}
+      {/* Recorder Card */}
       <div className="bg-slate-900/60 border border-slate-800 rounded-3xl p-8 sm:p-12 text-center space-y-6">
+        {/* State Badge */}
+        <div className="h-6 flex items-center justify-center">
+          {getStateBadge()}
+        </div>
+
         {/* Timer Display */}
         <div className="font-mono text-4xl sm:text-5xl font-extrabold text-white tracking-wider">
           {formatSeconds(recordingTime)}
         </div>
 
-        {/* Pulse / Visual Cue */}
+        {/* Pulse Indicator */}
         <div className="flex items-center justify-center">
           <div
             className={`w-28 h-28 rounded-full flex items-center justify-center transition-all ${
@@ -174,7 +276,7 @@ export const RecordView: React.FC<RecordViewProps> = ({
           {!isRecording && !recordedBlob && (
             <button
               onClick={startRecording}
-              className="px-8 py-3.5 rounded-2xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-semibold text-sm shadow-lg shadow-blue-500/20 transition-all flex items-center gap-2"
+              className="px-8 py-3.5 rounded-2xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-sm shadow-lg shadow-indigo-500/20 transition-all flex items-center gap-2"
             >
               <Mic className="w-4 h-4" />
               Start Recording
@@ -211,17 +313,17 @@ export const RecordView: React.FC<RecordViewProps> = ({
 
               <button
                 onClick={handleAnalyzeRecordedVoice}
-                disabled={isProcessing}
-                className="px-6 py-3 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-semibold text-sm shadow-lg shadow-emerald-500/20 transition-all flex items-center gap-2 disabled:opacity-50"
+                disabled={isProcessing || recordingTime < 1}
+                className="px-6 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-sm shadow-lg shadow-indigo-500/20 transition-all flex items-center gap-2 disabled:opacity-50"
               >
                 {isProcessing ? (
                   <>
                     <Loader2 className="w-4 h-4 animate-spin" />
-                    Analyzing Voice...
+                    {currentState === "detecting_language" ? "Detecting language..." : "Analyzing voice..."}
                   </>
                 ) : (
                   <>
-                    <Sparkles className="w-4 h-4" />
+                    <ShieldCheck className="w-4 h-4" />
                     Analyze Recorded Voice
                   </>
                 )}
@@ -241,7 +343,7 @@ export const RecordView: React.FC<RecordViewProps> = ({
 
         <p className="text-xs text-slate-500 max-w-sm mx-auto">
           {isRecording
-            ? "Recording in progress... speak clearly into your microphone."
+            ? "Speak clearly. Recommended duration: 3 to 10 seconds of speech."
             : recordedBlob
             ? "Recording captured! Click Play to listen or Analyze to verify authenticity."
             : "Click 'Start Recording' when you are ready to speak."}

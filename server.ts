@@ -54,7 +54,7 @@ app.use(express.urlencoded({ extended: true }));
 // Setup multer for temporary audio file storage
 const upload = multer({
   dest: path.join(os.tmpdir(), "voiceshield_uploads"),
-  limits: { fileSize: 50 * 1024 * 1024 }, // 50 MB limit
+  limits: { fileSize: 100 * 1024 * 1024 }, // 100 MB limit for audio and video
 });
 
 // Helper to resolve the correct Python executable (virtualenv or system python)
@@ -633,27 +633,114 @@ app.use("/data/samples", express.static(path.join(process.cwd(), "data", "sample
  * (WebM, MP3, M4A, FLAC, AAC, WAV, etc.) to standard 16kHz mono 16-bit PCM WAV.
  * Used identically for both Upload and Record flows.
  */
-function convertToStandardWav(inputPath: string, outputPath: string): Promise<void> {
+async function probeAudioDuration(filePath: string): Promise<number> {
+  return new Promise((resolve) => {
+    const proc = spawn("ffprobe", [
+      "-v", "error",
+      "-show_entries", "format=duration",
+      "-of", "csv=p=0",
+      filePath,
+    ]);
+    let stdout = "";
+    proc.stdout.on("data", (c) => (stdout += c.toString()));
+    proc.on("close", (code) => {
+      if (code === 0 && stdout.trim()) {
+        const d = parseFloat(stdout.trim());
+        if (!isNaN(d) && d > 0) return resolve(d);
+      }
+      resolve(-1);
+    });
+    proc.on("error", () => resolve(-1));
+  });
+}
+
+/**
+ * Fast ffprobe check to detect if an uploaded media file contains an audio stream.
+ */
+function probeHasAudioStream(filePath: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const proc = spawn("ffprobe", [
+      "-v", "error",
+      "-select_streams", "a:0",
+      "-show_entries", "stream=codec_type",
+      "-of", "csv=p=0",
+      filePath,
+    ]);
+    let stdout = "";
+    proc.stdout.on("data", (c) => (stdout += c.toString()));
+    proc.on("close", (code) => {
+      resolve(code === 0 && stdout.trim().toLowerCase().includes("audio"));
+    });
+    proc.on("error", () => resolve(false));
+  });
+}
+
+/**
+ * Fast speech offset locator using ffmpeg silencedetect.
+ * Scans leading audio up to 45s to locate where active voice begins rather than silence.
+ */
+function findSpeechOffset(filePath: string): Promise<number> {
+  return new Promise((resolve) => {
+    const proc = spawn("ffmpeg", [
+      "-nostdin",
+      "-v", "info",
+      "-t", "45",
+      "-i", filePath,
+      "-af", "silencedetect=noise=-30dB:d=0.3",
+      "-f", "null",
+      "-",
+    ]);
+    let stderr = "";
+    proc.stderr.on("data", (c) => (stderr += c.toString()));
+    proc.on("close", () => {
+      const match = stderr.match(/silence_end:\s*([0-9.]+)/);
+      if (match && match[1]) {
+        const offset = parseFloat(match[1]);
+        if (!isNaN(offset) && offset > 0 && offset < 40) {
+          return resolve(Math.max(0, offset - 0.2)); // 200ms lead-in
+        }
+      }
+      resolve(0.0);
+    });
+    proc.on("error", () => resolve(0.0));
+  });
+}
+
+/**
+ * Standardize audio or extract audio track from video:
+ * Converts/extracts to 16kHz mono 16-bit PCM WAV.
+ * Automatically supports seeking to startOffset (for speech segment selection)
+ * and discarding video track (-vn).
+ */
+function convertToStandardWav(
+  inputPath: string,
+  outputPath: string,
+  startOffset: number = 0.0,
+  duration: number = 15.0
+): Promise<void> {
   return new Promise((resolve, reject) => {
     if (!fs.existsSync(inputPath)) {
-      return reject(new Error(`Input audio file does not exist: ${inputPath}`));
+      return reject(new Error(`Input file does not exist: ${inputPath}`));
     }
     const stat = fs.statSync(inputPath);
     if (stat.size === 0) {
-      return reject(new Error(`Input audio file is empty (0 bytes): ${inputPath}`));
+      return reject(new Error(`Input file is empty (0 bytes): ${inputPath}`));
     }
 
-    const args = [
-      "-y",
-      "-nostdin",
-      "-v", "error",
+    const args = ["-y", "-nostdin", "-v", "error"];
+    if (startOffset > 0.05) {
+      args.push("-ss", startOffset.toFixed(2));
+    }
+    args.push(
       "-i", inputPath,
+      "-t", duration.toFixed(1),
+      "-vn", // Discard video track when processing video uploads
       "-ar", "16000",
       "-ac", "1",
       "-c:a", "pcm_s16le",
       "-f", "wav",
-      outputPath,
-    ];
+      outputPath
+    );
 
     const proc = spawn("ffmpeg", args);
     let stderr = "";
@@ -662,8 +749,8 @@ function convertToStandardWav(inputPath: string, outputPath: string): Promise<vo
       try {
         proc.kill("SIGKILL");
       } catch {}
-      reject(new Error("Audio conversion timed out after 6 seconds."));
-    }, 6000);
+      reject(new Error("Audio extraction/conversion timed out after 8 seconds."));
+    }, 8000);
 
     proc.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
@@ -691,16 +778,56 @@ const handleAnalyze = async (req: express.Request, res: express.Response) => {
   if (!file) {
     return res.status(400).json({
       error_type: "MissingFileError",
-      message: "Please select or record an audio file to analyze.",
+      message: "Please select or record an audio or video file to analyze.",
     });
   }
 
   const rawPath = file.path;
+  const originalName = file.originalname || "";
+  const ext = path.extname(originalName || file.path).toLowerCase().replace(".", "");
+  const mimeType = (file.mimetype || "").toLowerCase();
+
+  const isVideo = mimeType.startsWith("video/") || ["mp4", "mov", "mkv", "webm", "avi", "3gp", "ts"].includes(ext);
+  const isLive = req.body?.is_live === "true" || req.headers["x-is-live"] === "true" || originalName.startsWith("mic_") || originalName.startsWith("live_");
+  const input_type: "video" | "audio" | "live" = isVideo ? "video" : (isLive ? "live" : "audio");
+
+  // Validate video audio stream
+  if (isVideo) {
+    const hasAudio = await probeHasAudioStream(rawPath);
+    if (!hasAudio) {
+      try {
+        if (fs.existsSync(rawPath)) fs.unlinkSync(rawPath);
+      } catch {}
+      return res.status(400).json({
+        error_type: "NoAudioStreamError",
+        message: "This video does not contain an audio track.",
+      });
+    }
+  }
+
+  // Fast probe duration (< 50ms)
+  const probedDuration = await probeAudioDuration(rawPath);
+  let startOffset = 0.0;
+  let is_long_recording = false;
+  let user_notice: string | null = null;
+
+  if (probedDuration > 15.0) {
+    is_long_recording = true;
+    user_notice = "Long recording detected. A speech segment was selected for analysis.";
+    startOffset = await findSpeechOffset(rawPath);
+    console.log(`[handleAnalyze] Long recording detected (${probedDuration.toFixed(2)}s). Selected speech offset: ${startOffset.toFixed(2)}s`);
+  }
+
+  const tReqStart = performance.now();
+  let ffmpegDurationSec = 0;
+
   const standardWavPath = path.join(path.dirname(rawPath), `std_${Date.now()}_${path.basename(rawPath)}.wav`);
 
   try {
     const executionPromise = (async () => {
-      await convertToStandardWav(rawPath, standardWavPath);
+      const tFfmpegStart = performance.now();
+      await convertToStandardWav(rawPath, standardWavPath, startOffset, 15.0);
+      ffmpegDurationSec = (performance.now() - tFfmpegStart) / 1000;
       const params: Record<string, any> = {
         file: standardWavPath,
       };
@@ -726,7 +853,9 @@ const handleAnalyze = async (req: express.Request, res: express.Response) => {
       console.error(`[AudioProcessingError] Technical error processing '${rawPath}':`, convErr.message);
       return res.status(400).json({
         error_type: "AudioProcessingError",
-        message: "We couldn't process this audio. Please check the file format or try recording again.",
+        message: isVideo
+          ? "We couldn't extract the audio from this video. Please ensure it has a valid audio track."
+          : "We couldn't process this audio. Please check the file format or try recording again.",
       });
     }
 
@@ -736,24 +865,86 @@ const handleAnalyze = async (req: express.Request, res: express.Response) => {
       let userMsg = "We couldn't process this audio. Please try recording again.";
       if (result.data?.error_type === "AnalysisTimeoutError") {
         userMsg = result.data.message;
+      } else if (result.data?.error_type === "NoAudioStreamError" || rawMsg.includes("audio track")) {
+        userMsg = "This video does not contain an audio track.";
       } else if (result.data?.error_type === "AudioTooShortError" || rawMsg.includes("short")) {
-        userMsg = "The voice recording is too short. Please speak for at least 1 second.";
-      } else if (result.data?.error_type === "AudioSilentError" || rawMsg.includes("silent") || rawMsg.includes("Silence")) {
-        userMsg = "No clear voice was detected. Please ensure your microphone is active and speak clearly.";
+        userMsg = "The voice recording is too short. Please provide at least 1 second of speech.";
+      } else if (result.data?.error_type === "AudioSilentError" || rawMsg.includes("silent") || rawMsg.includes("Silence") || rawMsg.includes("speech")) {
+        userMsg = "No clear speech was detected.";
       }
 
-      return res.status(result.status).json({
+      return res.status(result.status === 200 ? 400 : result.status).json({
         error_type: result.data?.error_type || "AudioProcessingError",
         message: userMsg,
+        duration_sec: result.data?.duration_sec,
       });
     }
 
+    // Map simplified results safely (Scientifically responsible wording)
+    let simple_verdict = "UNABLE TO CONFIRM";
+    let simple_verdict_badge = "🟡 UNABLE TO CONFIRM";
+    if (result.data.classification === "GENUINE_LIVE") {
+      simple_verdict = "LIKELY GENUINE";
+      simple_verdict_badge = "🟢 LIKELY GENUINE";
+    } else if (result.data.classification === "SYNTHETIC_AI_GENERATED") {
+      simple_verdict = "POSSIBLE AI-GENERATED VOICE";
+      simple_verdict_badge = "🔴 POSSIBLE AI-GENERATED VOICE";
+    } else {
+      simple_verdict = "UNABLE TO CONFIRM";
+      simple_verdict_badge = "🟡 UNABLE TO CONFIRM";
+    }
+
+    // Standardize detected language formatting
+    if (
+      !result.data.detected_language ||
+      ["Unknown", "Unclear", "Silence", "Unavailable", "Error"].includes(result.data.detected_language) ||
+      (result.data.language_confidence !== undefined && result.data.language_confidence < 0.40)
+    ) {
+      result.data.detected_language = "Unable to confidently identify language";
+    }
+
+    result.data.input_type = input_type;
+    result.data.is_long_recording = is_long_recording;
+    result.data.user_notice = user_notice;
+    result.data.simple_verdict = simple_verdict;
+    result.data.simple_verdict_badge = simple_verdict_badge;
+
+    const totalE2ESec = (performance.now() - tReqStart) / 1000;
+
+    const timingBreakdown = {
+      ffmpeg_conversion_sec: Number(ffmpegDurationSec.toFixed(4)),
+      python_audio_ingest_sec: Number((result.data?.timing_diagnostics?.audio_ingestion_conversion_sec ?? 0).toFixed(4)),
+      total_ingestion_conversion_sec: Number((ffmpegDurationSec + (result.data?.timing_diagnostics?.audio_ingestion_conversion_sec ?? 0)).toFixed(4)),
+      model_loading_sec: Number((result.data?.timing_diagnostics?.model_loading_sec ?? 0).toFixed(4)),
+      model_resident_in_memory: result.data?.timing_diagnostics?.model_resident_in_memory ?? {},
+      reality_defender_api_sec: Number((result.data?.timing_diagnostics?.reality_defender_api_sec ?? 0).toFixed(4)),
+      reality_defender_state: result.data?.timing_diagnostics?.reality_defender_state ?? "UNKNOWN",
+      aasist_inference_sec: Number((result.data?.timing_diagnostics?.aasist_inference_sec ?? 0).toFixed(4)),
+      wav2vec2_inference_sec: Number((result.data?.timing_diagnostics?.wav2vec2_inference_sec ?? 0).toFixed(4)),
+      local_heuristic_sec: Number((result.data?.timing_diagnostics?.local_heuristic_sec ?? 0).toFixed(4)),
+      asr_transcribe_sec: Number((result.data?.timing_diagnostics?.asr_transcribe_sec ?? 0).toFixed(4)),
+      total_end_to_end_sec: Number(totalE2ESec.toFixed(4)),
+    };
+
+    result.data.timing_breakdown = timingBreakdown;
+
+    console.log("\n================= /analyze TIMING BREAKDOWN =================");
+    console.log(`1. Ingestion / extraction:     ${timingBreakdown.total_ingestion_conversion_sec}s (ffmpeg=${timingBreakdown.ffmpeg_conversion_sec}s, py_ingest=${timingBreakdown.python_audio_ingest_sec}s)`);
+    console.log(`2. Model loading:              ${timingBreakdown.model_loading_sec}s (Resident: AASIST=${timingBreakdown.model_resident_in_memory?.aasist}, Wav2Vec2=${timingBreakdown.model_resident_in_memory?.wav2vec2})`);
+    console.log(`3. Reality Defender API:       ${timingBreakdown.reality_defender_api_sec}s (State: ${timingBreakdown.reality_defender_state})`);
+    console.log(`4. AASIST inference:           ${timingBreakdown.aasist_inference_sec}s`);
+    console.log(`5. Wav2Vec2 inference:         ${timingBreakdown.wav2vec2_inference_sec}s`);
+    console.log(`6. Language & Speech (Whisper):${timingBreakdown.asr_transcribe_sec}s`);
+    console.log(`7. Total end-to-end time:      ${timingBreakdown.total_end_to_end_sec}s`);
+    console.log("============================================================\n");
+
     res.status(200).json(result.data);
+
   } catch (err: any) {
     console.error("[ServerError:Analyze] Technical error:", err);
     return res.status(500).json({
       error_type: "ServerError",
-      message: "We encountered an unexpected issue analyzing this voice sample. Please try again.",
+      message: "Voice analysis could not be completed.",
     });
   } finally {
     try {
@@ -767,6 +958,7 @@ const handleAnalyze = async (req: express.Request, res: express.Response) => {
 
 app.post("/analyze", apiRateLimitMiddleware, apiAuthMiddleware, upload.single("file"), handleAnalyze);
 app.post("/api/analyze", apiRateLimitMiddleware, apiAuthMiddleware, upload.single("file"), handleAnalyze);
+
 
 
 

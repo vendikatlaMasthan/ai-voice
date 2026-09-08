@@ -13,14 +13,14 @@ from typing import Optional
 @dataclass
 class AudioConfig:
     """Audio preprocessing and feature extraction parameters."""
-    sample_rate: int = 16000          # 16 kHz is standard for Wav2Vec2 / WavLM / Whisper
-    channels: int = 1                 # Mono audio
-    min_duration_sec: float = 0.5     # Minimum audio duration (reject shorter)
-    max_duration_sec: float = 30.0    # Maximum input audio length
-    target_duration_sec: float = 4.0  # Normalized evaluation window length (pad/trim to this)
-    silence_threshold_db: float = -45.0  # Threshold below which audio is classified as silent
-    min_speech_ratio: float = 0.15    # Minimum fraction of non-silent frames required
-    normalize_peak: bool = True       # Apply peak normalization to [-0.95, +0.95]
+    sample_rate: int = 16000            # 16 kHz is standard for Wav2Vec2 / WavLM / Whisper
+    channels: int = 1                   # Mono audio
+    min_duration_sec: float = 0.5       # Minimum audio duration (reject shorter)
+    max_duration_sec: float = 30.0      # Maximum input audio length
+    target_duration_sec: float = 4.0    # Normalized evaluation window length (pad/trim to this)
+    silence_threshold_db: float = -45.0 # Threshold below which audio is classified as silent
+    min_speech_ratio: float = 0.15      # Minimum fraction of non-silent frames required
+    normalize_peak: bool = True         # Apply peak normalization to [-0.95, +0.95]
     peak_level: float = 0.95
 
 
@@ -31,28 +31,44 @@ class ModelConfig:
     # Primary: "garystafford/wav2vec2-deepfake-voice-detector" (Pretrained Wav2Vec2 weights)
     # Alternative: "MelodyMachine/Deepfake-audio-detection-V2"
     hf_model_name: str = "garystafford/wav2vec2-deepfake-voice-detector"
-    
-    # Multilingual ASR & Spoken Language Identification (Whisper)
+
+    # Multilingual ASR & Language Identification via HuggingFace Transformers (Whisper).
+    # NOTE: "openai/whisper-small" is a HuggingFace Hub model ID — NOT an OpenAI API call.
+    # Set WHISPER_MODEL_ID to override. Set HF_OFFLINE=1 to force local-only loading.
     whisper_model_name: str = os.getenv("WHISPER_MODEL_ID", "openai/whisper-small")
-    
+
+    # If True, all HuggingFace model loads use local_files_only=True.
+    # Prevents HuggingFace Hub quota/network errors on air-gapped or cached deployments.
+    hf_offline_mode: bool = (
+        os.getenv("HF_OFFLINE", "0").strip() == "1"
+        or os.getenv("TRANSFORMERS_OFFLINE", "0").strip() == "1"
+        or os.getenv("HF_DATASETS_OFFLINE", "0").strip() == "1"
+    )
+
     # Path to local checkpoint or Hugging Face repo ID
     model_name_or_path: str = "garystafford/wav2vec2-deepfake-voice-detector"
     fine_tuned_weights_path: Optional[str] = None
-    
+
     # Execution device: 'cpu' by default; 'cuda' or 'auto' activates NVIDIA GPU only when safely available
     device: str = "cpu"
-    
+
     # Memory optimization for 8GB RAM / MX450 (2GB VRAM)
-    use_fp16: bool = False             # Set True for CUDA if GPU supports FP16 inference
-    batch_size: int = 1                # Single-sample inference for low VRAM
+    use_fp16: bool = False              # Set True for CUDA if GPU supports FP16 inference
+    batch_size: int = 1                 # Single-sample inference for low VRAM
     max_inference_length_samples: int = 16000 * 10  # 10 seconds maximum chunk for transformer memory
-    
+
     # Classification decision boundary
-    decision_threshold: float = 0.5   # Fake probability >= threshold -> "FAKE"
-    
+    decision_threshold: float = 0.5    # Fake probability >= threshold -> "FAKE"
+
     # Tier 1 Reality Defender API Settings (falls back to local model when unavailable)
     reality_defender_api_key: Optional[str] = os.getenv("REALITY_DEFENDER_API_KEY")
     reality_defender_timeout_sec: float = 6.0
+
+    # Google Gemini API — used for explanation/analysis layer ONLY, NOT deepfake detection
+    gemini_api_key: Optional[str] = os.getenv("GEMINI_API_KEY")
+
+    # AssemblyAI — optional STT transcription service, NOT a deepfake detector
+    assemblyai_api_key: Optional[str] = os.getenv("ASSEMBLYAI_API_KEY")
 
 
 @dataclass
@@ -60,7 +76,7 @@ class AppConfig:
     """Root Application Configuration."""
     audio: AudioConfig = field(default_factory=AudioConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
-    
+
     # Base filesystem paths
     base_dir: Path = field(default_factory=lambda: Path(__file__).resolve().parent.parent)
     data_dir: Path = field(default_factory=lambda: Path(__file__).resolve().parent.parent / "data")

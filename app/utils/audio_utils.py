@@ -42,9 +42,9 @@ class AudioTooShortError(AudioError):
 
 class AudioTooLongError(AudioError):
     """Raised when the audio duration exceeds the maximum limit."""
-    def __init__(self, duration_sec: float, max_allowed_sec: float):
+    def __init__(self, duration_sec: float, max_allowed_sec: float = 15.0):
         super().__init__(
-            f"Audio duration {duration_sec:.2f}s exceeds maximum allowed {max_allowed_sec:.2f}s."
+            "This clip is longer than we can process quickly, please trim it to under 15 seconds."
         )
         self.duration_sec = duration_sec
         self.max_allowed_sec = max_allowed_sec

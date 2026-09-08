@@ -35,9 +35,20 @@ export interface AnalysisRecord {
   detection_source: string; // "reality_defender" | "aasist" | "wav2vec2" | "local_fallback"
   risk_level: RiskLevel;
   explanation: string;
+  /** Gemini-generated human-readable explanation (undefined if GEMINI_API_KEY not set) */
+  gemini_explanation?: string;
   recommendedAction: string;
   flags: string[];
   audio_metadata?: AudioMetadata;
+  // Unified input, language, and simplified presentation
+  input_type?: "video" | "audio" | "live";
+  detected_language?: string;
+  language_code?: string;
+  language_confidence?: number;
+  is_long_recording?: boolean;
+  user_notice?: string;
+  simple_verdict?: string;
+  simple_verdict_badge?: string;
   // Legacy / convenience fields
   aiLikelihood: number; // mapped from sub_scores.synthetic_voice_score
   spoofProbability: number;
@@ -60,6 +71,15 @@ export interface HealthResponse {
   model?: string;
   device?: string;
   weights_loaded?: boolean;
+  pipeline?: {
+    ffmpeg_available?: boolean;
+    aasist_loaded?: boolean;
+    wav2vec2_loaded?: boolean;
+    whisper_asr_loaded?: boolean;
+    reality_defender_configured?: boolean;
+    gemini_configured?: boolean;
+    assemblyai_configured?: boolean;
+  };
 }
 
 export type NavTab = "dashboard" | "upload" | "record" | "results" | "history";

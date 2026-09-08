@@ -367,51 +367,72 @@ class SpeechRecognizer:
         return cls._instance
 
     def load_model(self) -> None:
-        """Loads Whisper model weights once into memory with graceful fallback."""
+        """
+        Loads Whisper model weights once into memory with graceful offline fallback.
+
+        Uses local_files_only=True when HF_OFFLINE=1 / TRANSFORMERS_OFFLINE=1 env vars
+        are set to prevent HuggingFace Hub quota errors on cached / air-gapped deployments.
+        NOTE: 'openai/whisper-small' is a HuggingFace Hub model ID — NOT an OpenAI API call.
+        """
         if self.is_loaded:
             return
 
         t0 = time.perf_counter()
-        logger.info(f"Loading Whisper model '{self.model_id}' on device '{self.device}'...")
 
-        try:
-            from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq
+        # Determine whether to restrict to local cache only
+        offline_mode = (
+            os.getenv("HF_OFFLINE", "0").strip() == "1"
+            or os.getenv("TRANSFORMERS_OFFLINE", "0").strip() == "1"
+            or os.getenv("HF_DATASETS_OFFLINE", "0").strip() == "1"
+        )
+        load_kwargs = {"local_files_only": True} if offline_mode else {}
 
-            self.processor = AutoProcessor.from_pretrained(self.model_id)
-            self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
-                self.model_id,
-                dtype=self.torch_dtype,
-                low_cpu_mem_usage=True,
-            )
-            self.model.to(self.device)
-            self.model.eval()
-            self.is_loaded = True
-            self.load_time_sec = time.perf_counter() - t0
-            logger.info(f"Whisper model loaded successfully in {self.load_time_sec:.2f}s!")
-        except Exception as e:
-            logger.warning(
-                f"Failed to load Whisper model '{self.model_id}': {e}. Attempting fallback to 'openai/whisper-tiny'...",
-                exc_info=True,
-            )
-            if self.model_id != "openai/whisper-tiny":
-                try:
-                    from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq
-                    self.model_id = "openai/whisper-tiny"
-                    self.processor = AutoProcessor.from_pretrained(self.model_id)
-                    self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
-                        self.model_id,
-                        dtype=self.torch_dtype,
-                        low_cpu_mem_usage=True,
-                    )
-                    self.model.to(self.device)
-                    self.model.eval()
-                    self.is_loaded = True
-                    self.load_time_sec = time.perf_counter() - t0
-                    logger.info(f"Fallback Whisper-tiny loaded successfully in {self.load_time_sec:.2f}s!")
-                    return
-                except Exception as fallback_err:
-                    logger.error(f"Fallback to Whisper-tiny also failed: {fallback_err}")
-            self.is_loaded = False
+        logger.info(
+            f"[ASR] Loading Whisper model '{self.model_id}' on device '{self.device}' "
+            f"(offline_mode={offline_mode})..."
+        )
+
+        def _try_load(model_id: str, kwargs: dict) -> bool:
+            """Attempt to load processor + model, returns True on success."""
+            try:
+                from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq
+                self.processor = AutoProcessor.from_pretrained(model_id, **kwargs)
+                self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
+                    model_id,
+                    torch_dtype=self.torch_dtype,
+                    low_cpu_mem_usage=True,
+                    **kwargs,
+                )
+                self.model.to(self.device)
+                self.model.eval()
+                self.model_id = model_id
+                self.is_loaded = True
+                self.load_time_sec = round(time.perf_counter() - t0, 2)
+                logger.info(f"[ASR] Whisper '{model_id}' loaded in {self.load_time_sec}s")
+                return True
+            except Exception as err:
+                logger.warning(f"[ASR] Failed to load '{model_id}': {err}")
+                return False
+
+        # Primary attempt
+        if _try_load(self.model_id, load_kwargs):
+            return
+
+        # Fallback: try whisper-tiny (HuggingFace model ID — NOT an OpenAI API call)
+        fallback_id = "openai/whisper-tiny"
+        if self.model_id != fallback_id:
+            logger.warning(f"[ASR] Attempting fallback to '{fallback_id}'...")
+            if _try_load(fallback_id, load_kwargs):
+                return
+
+        # Final fallback: if offline mode and both fail, mark unavailable (graceful degradation)
+        logger.error(
+            "[ASR] All Whisper model load attempts failed. "
+            "ASR will be unavailable — deepfake detection pipeline is unaffected."
+        )
+        self.is_loaded = False
+        self.model = None
+        self.processor = None
 
     def extract_fraud_keywords(self, text: str) -> Tuple[List[str], List[str]]:
         """

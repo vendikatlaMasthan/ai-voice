@@ -43,7 +43,7 @@ from app.utils.audio_utils import (
     linear_to_db,
 )
 from app.models.asr import SpeechRecognizer, ASRResult
-from app.models.detector import VoiceCloneDetector, determine_classification
+from app.models.detector import VoiceCloneDetector, determine_classification, PredictionResult, BaselineSpectralDetector
 from app.risk.context import CallContext, resolve_speech_profile
 from app.risk.scoring import VoiceShieldRiskEngine
 from app.risk.verification import SecondaryVerificationStateMachine
@@ -360,15 +360,54 @@ class PipelineWorker:
         pass
 
     def handle_health(self) -> dict:
+        import subprocess as _sp
+        # FFmpeg availability check
+        try:
+            _sp.run(["ffmpeg", "-version"], capture_output=True, timeout=3, check=True)
+            ffmpeg_ok = True
+        except Exception:
+            ffmpeg_ok = False
+
+        # AASIST loaded state
+        aasist_loaded = False
+        if hasattr(self, "detector") and hasattr(self.detector, "aasist"):
+            aasist_loaded = bool(getattr(self.detector.aasist, "is_loaded", False))
+
+        # Wav2Vec2 loaded state
+        wav2vec2_loaded = False
+        if hasattr(self, "detector") and hasattr(self.detector, "detector"):
+            wav2vec2_loaded = bool(getattr(self.detector.detector, "is_loaded", False))
+
+        # Whisper ASR loaded state
+        whisper_loaded = False
+        if hasattr(self, "speech_recognizer") and self.speech_recognizer:
+            whisper_loaded = bool(getattr(self.speech_recognizer, "is_loaded", False))
+
+        # External API configuration (key presence only — never expose key values)
+        reality_defender_configured = bool(os.environ.get("REALITY_DEFENDER_API_KEY", "").strip())
+        gemini_configured = bool(os.environ.get("GEMINI_API_KEY", "").strip())
+        assemblyai_configured = bool(os.environ.get("ASSEMBLYAI_API_KEY", "").strip())
+
         return {
             "status": "ok",
             "service": "VoiceShield API",
-            "version": "1.0.0",
+            "version": "2.0.0",
+            "architecture": "Reality Defender -> AASIST -> Wav2Vec2 -> Spectral Fallback",
+            "pipeline": {
+                "ffmpeg_available": ffmpeg_ok,
+                "aasist_loaded": aasist_loaded,
+                "wav2vec2_loaded": wav2vec2_loaded,
+                "whisper_asr_loaded": whisper_loaded,
+                "reality_defender_configured": reality_defender_configured,
+                "gemini_configured": gemini_configured,
+                "assemblyai_configured": assemblyai_configured,
+            },
             "supported_models": [
-                "garystafford/wav2vec2-deepfake-voice-detector",
+                "Reality Defender RealAPI (Tier 1 — when configured)",
+                "AASIST-ASVspoof2019 (Tier 2)",
+                "garystafford/wav2vec2-deepfake-voice-detector (Tier 3)",
+                "BaselineSpectralDetector (Tier 4 fallback)",
             ],
-            "hardware_profile": "8GB RAM + NVIDIA MX450 / CPU Optimized",
-            "phases_active": [1, 2, 3, 4],
             "persistent_daemon": True,
             "model_load_count": self.model_load_count,
         }
@@ -391,12 +430,158 @@ class PipelineWorker:
         transcript_text = args.get("transcript_text")
         raw_acoustic_override = args.get("acoustic_anomaly")
 
+        sys.stderr.write(f"[PIPELINE:INGEST] audio_path='{audio_path}'\n")
+
         if not audio_path or not os.path.exists(audio_path):
             raise FileNotFoundAudioError(f"Audio file not found: {audio_path}")
 
+        file_size = os.path.getsize(audio_path)
+        sys.stderr.write(f"[PIPELINE:INGEST] file_size={file_size}B exists=True\n")
+
+        # 1. Model residency check / loading timing
+        t_model_load_start = time.perf_counter()
+        aasist_already_resident = hasattr(self.detector, "aasist") and bool(getattr(self.detector.aasist, "is_loaded", False))
+        wav2vec2_already_resident = hasattr(self.detector, "detector") and bool(getattr(self.detector.detector, "is_loaded", False))
+        if not aasist_already_resident:
+            self.detector.aasist.load_model()
+        if not wav2vec2_already_resident:
+            self.detector.detector.load_model()
+        t_model_load_sec = time.perf_counter() - t_model_load_start
+
+        # 2. Audio ingestion & conversion timing (in Python)
+        t_ingest_start = time.perf_counter()
         preprocessed = self.preprocessor.process(audio_path)
-        prediction_result = self.detector.predict(preprocessed)
-        prosody_result = self.prosody_analyzer.analyze(preprocessed)
+        t_ingest_sec = time.perf_counter() - t_ingest_start
+
+        sys.stderr.write(
+            f"[PIPELINE:NORMALIZE] sr={preprocessed.sample_rate} "
+            f"dur={preprocessed.processed_duration_sec:.2f}s "
+            f"rms={preprocessed.rms_energy_db:.1f}dB "
+            f"snr={preprocessed.estimated_snr_db:.1f}dB "
+            f"samples={len(preprocessed.waveform)} channels={preprocessed.channels}\n"
+        )
+
+        # 3. Reality Defender API call timing
+        # Concurrent tier execution:
+        # Run independent tiers (Reality Defender API, AASIST, Wav2Vec2, Prosody, Whisper ASR)
+        # in parallel using ThreadPoolExecutor to prevent sequential latency accumulation.
+        import concurrent.futures
+
+        def _task_rd():
+            t0 = time.perf_counter()
+            ok, res, st = False, None, "NOT_CONFIGURED"
+            if self.detector.reality_defender.is_configured:
+                ok, res, st = self.detector.reality_defender.predict(preprocessed, audio_path=audio_path)
+            dt = time.perf_counter() - t0
+            return ok, res, st, dt
+
+        def _task_aasist():
+            t0 = time.perf_counter()
+            ok, res = False, None
+            try:
+                ok, res = self.detector.aasist.predict(preprocessed)
+            except Exception as e:
+                sys.stderr.write(f"[PIPELINE:AASISTError] {e}\n")
+            dt = time.perf_counter() - t0
+            return ok, res, dt
+
+        def _task_w2v():
+            t0 = time.perf_counter()
+            res = None
+            try:
+                res = self.detector.detector.predict(preprocessed)
+            except Exception as e:
+                sys.stderr.write(f"[PIPELINE:Wav2Vec2Error] {e}\n")
+            dt = time.perf_counter() - t0
+            return res, dt
+
+        def _task_prosody():
+            t0 = time.perf_counter()
+            res = self.prosody_analyzer.analyze(preprocessed)
+            dt = time.perf_counter() - t0
+            return res, dt
+
+        def _task_asr():
+            t0 = time.perf_counter()
+            res = ASRResult()
+            try:
+                if hasattr(self, "speech_recognizer") and self.speech_recognizer is not None:
+                    res = self.speech_recognizer.transcribe(preprocessed, sample_rate=preprocessed.sample_rate)
+            except Exception as e:
+                sys.stderr.write(f"[PipelineWorker:ASRError] {e}\n")
+            dt = time.perf_counter() - t0
+            return res, dt
+
+        sys.stderr.write("[PIPELINE:CONCURRENT] Launching independent detection tiers concurrently...\n")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            fut_rd = executor.submit(_task_rd)
+            fut_aasist = executor.submit(_task_aasist)
+            fut_w2v = executor.submit(_task_w2v)
+            fut_prosody = executor.submit(_task_prosody)
+            fut_asr = executor.submit(_task_asr)
+
+            rd_ok, rd_result, rd_state, t_rd_sec = fut_rd.result()
+            aasist_ok, aasist_res, t_aasist_sec = fut_aasist.result()
+            w2v_res, t_w2v_sec = fut_w2v.result()
+            prosody_result, t_heuristic_sec = fut_prosody.result()
+            asr_res, t_asr_sec = fut_asr.result()
+
+        # DETERMINISTIC COMBINATION LOGIC (SPEC.md Priority Hierarchy):
+        # 1. Tier 1: Reality Defender API (Primary authority when configured and successful)
+        # 2. Tier 2: AASIST (Secondary anti-spoofing model)
+        # 3. Tier 3: Wav2Vec2 (Transformer acoustic model fallback)
+        # 4. Tier 4: Baseline Spectral (Deterministic fallback)
+        #
+        # Note: All threads run concurrently, but their results are combined strictly
+        # according to the priority order above, ensuring 100% deterministic output
+        # regardless of thread completion timing.
+        if rd_ok and rd_result is not None:
+            prediction_result = PredictionResult(
+                prediction=rd_result["prediction"],
+                fake_probability=rd_result["fake_probability"],
+                real_probability=rd_result["real_probability"],
+                metadata={
+                    **rd_result,
+                    "detection_source": "reality_defender",
+                    "detection_tier": "TIER_1_REALITY_DEFENDER",
+                    "audio_duration_sec": preprocessed.processed_duration_sec,
+                    "sample_rate": preprocessed.sample_rate,
+                },
+            )
+        elif aasist_ok and aasist_res is not None:
+            fake_p = aasist_res["fake_probability"]
+            real_p = aasist_res["real_probability"]
+            pred = "FAKE" if fake_p >= self.detector.config.decision_threshold else "REAL"
+            prediction_result = PredictionResult(
+                prediction=pred,
+                fake_probability=fake_p,
+                real_probability=real_p,
+                metadata={
+                    **aasist_res,
+                    "detection_source": "aasist",
+                    "detection_tier": "TIER_2_AASIST",
+                    "audio_duration_sec": preprocessed.processed_duration_sec,
+                    "sample_rate": preprocessed.sample_rate,
+                },
+            )
+        elif w2v_res is not None:
+            w2v_res.metadata["detection_source"] = "wav2vec2"
+            w2v_res.metadata["detection_tier"] = "TIER_3_LOCAL_WAV2VEC2_FALLBACK"
+            prediction_result = w2v_res
+        else:
+            baseline = BaselineSpectralDetector(self.detector.config)
+            baseline.load_model()
+            prediction_result = baseline.predict(preprocessed)
+            prediction_result.metadata["detection_source"] = "local_fallback"
+            prediction_result.metadata["detection_tier"] = "TIER_4_BASELINE_SPECTRAL_FALLBACK"
+
+        detection_source = prediction_result.metadata.get("detection_source", "local_fallback")
+        detection_tier = prediction_result.metadata.get("detection_tier", "UNKNOWN")
+        sys.stderr.write(
+            f"[PIPELINE:INFERENCE] source={detection_source} tier={detection_tier} "
+            f"fake_prob={prediction_result.fake_probability:.4f} "
+            f"real_prob={prediction_result.real_probability:.4f}\n"
+        )
 
         # Use explicit override if passed and > 0.0, otherwise use calculated dynamic acoustic anomaly
         if raw_acoustic_override is not None and float(raw_acoustic_override) > 0.0:
@@ -421,14 +606,6 @@ class PipelineWorker:
             "speaker_mismatch_flag": 0,
             "inference_time_ms": 0.0,
         }
-
-        # 4. Local Multilingual Speech Recognition (ASR) & Language Identification
-        asr_res = ASRResult()
-        try:
-            if hasattr(self, "speech_recognizer") and self.speech_recognizer is not None:
-                asr_res = self.speech_recognizer.transcribe(preprocessed, sample_rate=preprocessed.sample_rate)
-        except Exception as e:
-            sys.stderr.write(f"[PipelineWorker:ASRError] {e}\n")
 
         call_context = extract_call_context(args)
 
@@ -477,6 +654,13 @@ class PipelineWorker:
             acoustic_anomaly=acoustic_anomaly,
             snr_db=preprocessed.estimated_snr_db,
             hf_energy_ratio=hf_ratio,
+            detection_source=prediction_result.metadata.get("detection_source", "local_fallback"),
+        )
+
+        sys.stderr.write(
+            f"[PIPELINE:CLASSIFY] classification={target_classification} "
+            f"risk_score={risk_assessment.risk_score} risk_level={risk_assessment.risk_level} "
+            f"acoustic_anomaly={acoustic_anomaly:.3f} hf_ratio={hf_ratio:.3f}\n"
         )
 
         return {
@@ -486,7 +670,7 @@ class PipelineWorker:
             "risk_score": risk_assessment.risk_score,
             "risk_level": risk_assessment.risk_level,
             "verification_session": verification_session.to_dict(),
-            "detected_language": asr_res.language_name if asr_res.language_confidence >= 0.50 else "Unclear",
+            "detected_language": asr_res.language_name if (asr_res.is_speech and asr_res.language_confidence >= 0.40 and asr_res.language_name not in ["Unknown", "Unclear", "Silence", "Unavailable", "Error"]) else "Unable to confidently identify language",
             "language_confidence": asr_res.language_confidence,
             "speech_profile": speech_prof,
             "language_profile": speech_prof,
@@ -541,6 +725,20 @@ class PipelineWorker:
                 "processed_duration_sec": round(preprocessed.processed_duration_sec, 2),
                 "estimated_snr_db": round(preprocessed.estimated_snr_db, 2),
                 "rms_db": round(preprocessed.rms_energy_db, 2),
+            },
+            "timing_diagnostics": {
+                "audio_ingestion_conversion_sec": round(t_ingest_sec, 4),
+                "model_loading_sec": round(t_model_load_sec, 4),
+                "model_resident_in_memory": {
+                    "aasist": aasist_already_resident,
+                    "wav2vec2": wav2vec2_already_resident,
+                },
+                "reality_defender_api_sec": round(t_rd_sec, 4),
+                "reality_defender_state": rd_state,
+                "aasist_inference_sec": round(t_aasist_sec, 4),
+                "wav2vec2_inference_sec": round(t_w2v_sec, 4),
+                "local_heuristic_sec": round(t_heuristic_sec, 4),
+                "asr_transcribe_sec": round(t_asr_sec, 4),
             },
         }
 
