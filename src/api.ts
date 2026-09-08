@@ -1,9 +1,15 @@
-import { AnalysisRecord, HealthResponse, SampleAudio, VerdictType } from "./types";
+import {
+  AnalysisRecord,
+  ClassificationType,
+  HealthResponse,
+  RiskLevel,
+  SampleAudio,
+  SubScores,
+} from "./types";
 
 /**
- * Base URL for the AASIST FastAPI backend.
- * Configured via VITE_API_URL in .env (local) or .env.production (Hugging Face Spaces / Cloud).
- * Example: "http://localhost:8000" or "https://username-voiceshield-api.hf.space"
+ * Base URL for the VoiceShield backend.
+ * Configured via VITE_API_URL in .env (local) or .env.production (Cloud).
  */
 const RAW_API_URL = import.meta.env.VITE_API_URL || "";
 const API_BASE = RAW_API_URL.replace(/\/+$/, "");
@@ -42,7 +48,7 @@ async function parseJsonSafely(res: Response): Promise<any> {
 }
 
 /**
- * Health check endpoint for AASIST backend.
+ * Health check endpoint for VoiceShield backend.
  */
 export async function fetchHealth(): Promise<HealthResponse> {
   try {
@@ -57,8 +63,7 @@ export async function fetchHealth(): Promise<HealthResponse> {
 
   return {
     status: "offline",
-    model: "AASIST",
-    weights_loaded: false,
+    architecture: "VoiceShield Engine (Offline)",
   };
 }
 
@@ -80,15 +85,14 @@ export async function fetchSamples(): Promise<SampleAudio[]> {
 }
 
 /**
- * Real AASIST Deepfake Voice Analysis.
+ * VoiceShield AI Voice Clone & Anti-Spoofing Analysis.
  *
- * Transmits audio file to the AASIST FastAPI backend:
- * POST ${VITE_API_URL}/api/analyze
- *
- * Returns real inference output:
- * - spoof_probability (0.0 to 1.0)
- * - label: "bonafide" | "spoof"
- * - model: "AASIST"
+ * Conforms to SPEC.md canonical contract:
+ * - classification: GENUINE_LIVE | REPLAYED_RECORDED | SYNTHETIC_AI_GENERATED | UNCERTAIN
+ * - sub_scores: { synthetic_voice_score, replay_channel_score, naturalness_score }
+ * - detection_source: reality_defender | aasist | wav2vec2 | local_fallback
+ * - risk_level: Low | Medium | High
+ * - Hard 15-second frontend timeout cap
  */
 export async function analyzeAudio(
   audioFile: File | Blob,
@@ -99,8 +103,9 @@ export async function analyzeAudio(
   const formData = new FormData();
   formData.append("file", audioFile, fileName);
 
+  // 15-second hard frontend timeout cap per SPEC.md Phase 5
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 25000); // 25s timeout
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
 
   let res: Response;
   try {
@@ -116,7 +121,7 @@ export async function analyzeAudio(
     clearTimeout(timeoutId);
     console.error("[VoiceShield Technical Error]:", err);
     if (err.name === "AbortError" || err.message?.includes("timed out")) {
-      throw new Error("Analysis timed out. The backend model is taking longer than expected.");
+      throw new Error("We couldn't complete the analysis in time. Please try a shorter recording or try again.");
     }
     const raw = String(err.message || "");
     if (
@@ -130,8 +135,8 @@ export async function analyzeAudio(
       throw new Error(raw);
     }
     const backendHint = API_BASE
-      ? `Cannot reach backend at ${API_BASE}. Please verify your backend server is running.`
-      : "Backend service is not reachable. Please check your connection.";
+      ? `Cannot reach VoiceShield backend at ${API_BASE}. Please ensure the server is active.`
+      : "VoiceShield detection service is not reachable. Please check your connection.";
     throw new Error(backendHint);
   } finally {
     clearTimeout(timeoutId);
@@ -153,49 +158,88 @@ export async function analyzeAudio(
         errorDetail = rawMsg;
       }
     } catch {
-      // Use user-friendly fallback
+      // Use sanitized fallback
     }
     throw new Error(errorDetail);
   }
 
   const data = await parseJsonSafely(res);
 
-  // Parse real AASIST response
-  const spoofProb = typeof data.spoof_probability === "number" ? data.spoof_probability : 0.5;
-  const bonafideProb = typeof data.bonafide_probability === "number" ? data.bonafide_probability : (1.0 - spoofProb);
-  const label: "bonafide" | "spoof" = data.label === "spoof" ? "spoof" : "bonafide";
-  const modelName = data.model || "AASIST";
+  // Parse canonical contract fields
+  const classification: ClassificationType = (
+    ["GENUINE_LIVE", "REPLAYED_RECORDED", "SYNTHETIC_AI_GENERATED", "UNCERTAIN"].includes(data.classification)
+      ? data.classification
+      : "UNCERTAIN"
+  ) as ClassificationType;
 
-  const aiLikelihood = Math.round(spoofProb * 100);
+  const rawSubScores = data.sub_scores || {};
+  const sub_scores: SubScores = {
+    synthetic_voice_score: typeof rawSubScores.synthetic_voice_score === "number"
+      ? rawSubScores.synthetic_voice_score
+      : Math.round((data.spoof_probability ?? 0.5) * 100),
+    replay_channel_score: typeof rawSubScores.replay_channel_score === "number"
+      ? rawSubScores.replay_channel_score
+      : 0,
+    naturalness_score: typeof rawSubScores.naturalness_score === "number"
+      ? rawSubScores.naturalness_score
+      : 50,
+  };
 
-  const verdict: VerdictType = label === "spoof" ? "SYNTHETIC_AI" : "GENUINE_LIVE";
-  const verdictLabel = label === "spoof" ? "Spoof (AI Synthetic Voice)" : "Bonafide (Genuine Human Voice)";
-  const verdictColor = label === "spoof" ? "red" : "green";
+  const detection_source = String(data.detection_source || data.model || "aasist");
+  const risk_level: RiskLevel = (["Low", "Medium", "High"].includes(data.risk_level) ? data.risk_level : "Medium") as RiskLevel;
 
-  const explanation = label === "spoof"
-    ? `AASIST spectro-temporal graph attention network detected spoofing artifacts characteristic of synthetic speech synthesis or voice cloning (Spoof Probability: ${(spoofProb * 100).toFixed(1)}%).`
-    : `AASIST spectro-temporal graph attention network validated natural acoustic spectral properties consistent with a genuine live human speaker (Spoof Probability: ${(spoofProb * 100).toFixed(1)}%).`;
+  // Derive visual badges and colors
+  let verdictLabel = "Uncertain / Borderline Acoustics";
+  let verdictColor: "green" | "red" | "amber" | "yellow" = "yellow";
 
-  const recommendedAction = label === "spoof"
-    ? "High risk of voice cloning or deepfake synthesis. Request secondary verification before taking action."
-    : "Audio demonstrates bonafide vocal tract characteristics. Standard biometric verification passed.";
+  if (classification === "GENUINE_LIVE") {
+    verdictLabel = "Genuine Live Human Voice";
+    verdictColor = "green";
+  } else if (classification === "SYNTHETIC_AI_GENERATED") {
+    verdictLabel = "Synthetic AI Generated Voice";
+    verdictColor = "red";
+  } else if (classification === "REPLAYED_RECORDED") {
+    verdictLabel = "Replayed / Recorded Voice";
+    verdictColor = "amber";
+  }
+
+  const explanation = String(
+    data.explanation ||
+    `Analysis completed by ${detection_source} (Synthetic Voice Score: ${sub_scores.synthetic_voice_score}/100).`
+  );
+
+  const recommendedAction = String(
+    data.recommended_action ||
+    (classification === "SYNTHETIC_AI_GENERATED"
+      ? "High risk of AI synthesis. Request secondary verification before taking action."
+      : "Standard voice validation completed.")
+  );
+
+  const flags: string[] = Array.isArray(data.flags) ? data.flags : [];
 
   const audioUrl = URL.createObjectURL(audioFile);
-  const scanId = `AASIST-${Date.now().toString(36).toUpperCase()}`;
+  const scanId = String(data.scan_id || data.call_id || `VS-${Date.now().toString(36).toUpperCase()}`);
 
   return {
     id: scanId,
     timestamp: Date.now(),
     fileName,
-    verdict,
+    durationSec: data.audio_metadata?.processed_duration_sec,
+    classification,
+    verdict: classification,
     verdictLabel,
     verdictColor,
+    sub_scores,
+    detection_source,
+    risk_level,
     explanation,
     recommendedAction,
-    aiLikelihood,
-    spoofProbability: Math.round(spoofProb * 10000) / 10000,
-    bonafideProbability: Math.round(bonafideProb * 10000) / 10000,
-    modelName,
+    flags,
+    audio_metadata: data.audio_metadata,
+    aiLikelihood: Math.round(sub_scores.synthetic_voice_score),
+    spoofProbability: sub_scores.synthetic_voice_score / 100.0,
+    bonafideProbability: (100.0 - sub_scores.synthetic_voice_score) / 100.0,
+    modelName: detection_source,
     audioUrl,
     rawResponse: data,
   };

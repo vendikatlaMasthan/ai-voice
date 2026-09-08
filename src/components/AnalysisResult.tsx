@@ -2,15 +2,18 @@ import React, { useState, useRef } from "react";
 import {
   ShieldCheck,
   AlertTriangle,
+  Radio,
+  HelpCircle,
   Play,
   Pause,
   ArrowLeft,
   Info,
   CheckCircle2,
-  XCircle,
   Cpu,
+  Layers,
+  Activity,
 } from "lucide-react";
-import { AnalysisRecord } from "../types";
+import { AnalysisRecord, ClassificationType } from "../types";
 
 interface AnalysisResultProps {
   record: AnalysisRecord;
@@ -35,27 +38,67 @@ export const AnalysisResult: React.FC<AnalysisResultProps> = ({
     }
   };
 
-  const isSpoof = record.verdict === "SYNTHETIC_AI" || record.verdict === "SYNTHETIC_AI_GENERATED" || record.aiLikelihood >= 50;
+  const getPresentation = (classification: ClassificationType) => {
+    switch (classification) {
+      case "GENUINE_LIVE":
+        return {
+          title: "Genuine Live Human Voice",
+          badgeText: "GENUINE LIVE",
+          badgeColor: "bg-emerald-500/20 text-emerald-300 border-emerald-500/40",
+          cardBorder: "border-emerald-500/40 bg-emerald-950/10",
+          icon: ShieldCheck,
+          iconColor: "text-emerald-400",
+        };
+      case "SYNTHETIC_AI_GENERATED":
+        return {
+          title: "Synthetic AI Generated Voice",
+          badgeText: "SYNTHETIC AI GENERATED",
+          badgeColor: "bg-rose-500/20 text-rose-300 border-rose-500/40",
+          cardBorder: "border-rose-500/40 bg-rose-950/10",
+          icon: AlertTriangle,
+          iconColor: "text-rose-400",
+        };
+      case "REPLAYED_RECORDED":
+        return {
+          title: "Replayed / Recorded Voice",
+          badgeText: "REPLAYED RECORDED",
+          badgeColor: "bg-amber-500/20 text-amber-300 border-amber-500/40",
+          cardBorder: "border-amber-500/40 bg-amber-950/10",
+          icon: Radio,
+          iconColor: "text-amber-400",
+        };
+      case "UNCERTAIN":
+      default:
+        return {
+          title: "Uncertain / Inconclusive Acoustics",
+          badgeText: "UNCERTAIN",
+          badgeColor: "bg-amber-500/20 text-amber-300 border-amber-500/40",
+          cardBorder: "border-amber-500/40 bg-amber-950/10",
+          icon: HelpCircle,
+          iconColor: "text-amber-400",
+        };
+    }
+  };
 
-  const presentation = isSpoof
-    ? {
-        title: "Spoof Voice Detected",
-        badgeText: "Spoof (Synthetic / Cloned)",
-        badgeColor: "bg-rose-500/20 text-rose-300 border-rose-500/40",
-        cardBorder: "border-rose-500/40 bg-rose-950/10",
-        icon: AlertTriangle,
-        iconColor: "text-rose-400",
-      }
-    : {
-        title: "Bonafide Voice Verified",
-        badgeText: "Bonafide (Genuine Human)",
-        badgeColor: "bg-emerald-500/20 text-emerald-300 border-emerald-500/40",
-        cardBorder: "border-emerald-500/40 bg-emerald-950/10",
-        icon: ShieldCheck,
-        iconColor: "text-emerald-400",
-      };
-
+  const presentation = getPresentation(record.classification);
   const IconComponent = presentation.icon;
+
+  const sub = record.sub_scores || {
+    synthetic_voice_score: record.aiLikelihood || 0,
+    replay_channel_score: 0,
+    naturalness_score: 50,
+  };
+
+  const getRiskBadge = (level: string) => {
+    switch (level?.toLowerCase()) {
+      case "high":
+        return "bg-rose-500/20 text-rose-300 border-rose-500/40";
+      case "medium":
+        return "bg-amber-500/20 text-amber-300 border-amber-500/40";
+      default:
+        return "bg-emerald-500/20 text-emerald-300 border-emerald-500/40";
+    }
+  };
 
   return (
     <div className="max-w-4xl mx-auto space-y-8">
@@ -82,175 +125,130 @@ export const AnalysisResult: React.FC<AnalysisResultProps> = ({
                 <h1 className="text-xl sm:text-2xl font-bold text-white">{presentation.title}</h1>
               </div>
               <p className="text-xs text-slate-400 mt-1">
-                Inspected: <span className="text-slate-300 font-medium">{record.fileName}</span>
+                Inspected File: <span className="text-slate-300 font-medium">{record.fileName}</span>
               </p>
-              {/* Official Model Attribution Caption */}
+              {/* Detection Source Badge per SPEC.md */}
               <p className="text-xs text-indigo-400 font-semibold mt-1.5 flex items-center gap-1.5">
                 <Cpu className="w-3.5 h-3.5" />
-                Powered by AASIST — trained on ASVspoof2019.
+                Detection Source: <span className="text-white font-mono uppercase bg-indigo-950/80 px-2 py-0.5 rounded border border-indigo-700/50">{record.detection_source}</span>
               </p>
             </div>
           </div>
 
-          <span className={`px-4 py-1.5 rounded-full text-xs font-bold border uppercase tracking-wide ${presentation.badgeColor}`}>
-            {presentation.badgeText}
-          </span>
-        </div>
-
-        {/* Neural Network Explanation */}
-        <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-5 space-y-2">
-          <div className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
-            <Info className="w-3.5 h-3.5 text-blue-400" /> AASIST Classification Summary
-          </div>
-          <p className="text-sm text-slate-200 leading-relaxed">{record.explanation}</p>
-        </div>
-
-        {/* Recommended Action */}
-        <div className="p-4 rounded-2xl bg-slate-900/80 border border-slate-700/60 flex items-start gap-3">
-          {isSpoof ? (
-            <XCircle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
-          ) : (
-            <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
-          )}
-          <div>
-            <div className="text-xs font-bold uppercase tracking-wider text-slate-400">Recommended Action</div>
-            <div className="text-sm font-semibold text-white mt-0.5">{record.recommendedAction}</div>
-          </div>
-        </div>
-      </div>
-
-      {/* Real Response Fields Display */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        {/* 1. AI Likelihood (Spoof Probability %) */}
-        <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-5 space-y-3">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-slate-400">AI Likelihood</span>
-            <span
-              className={`text-xs font-bold ${
-                record.aiLikelihood > 60
-                  ? "text-rose-400"
-                  : record.aiLikelihood > 30
-                  ? "text-yellow-400"
-                  : "text-emerald-400"
-              }`}
-            >
-              {record.aiLikelihood}%
+          <div className="flex flex-col sm:items-end gap-2">
+            <span className={`px-4 py-1.5 rounded-full text-xs font-bold border uppercase tracking-wide ${presentation.badgeColor}`}>
+              {presentation.badgeText}
+            </span>
+            <span className={`px-3 py-1 rounded-md text-[11px] font-semibold border uppercase tracking-wide ${getRiskBadge(record.risk_level)}`}>
+              Risk Level: {record.risk_level || "Medium"}
             </span>
           </div>
-
-          <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
-            <div
-              className={`h-full rounded-full transition-all ${
-                record.aiLikelihood > 60
-                  ? "bg-rose-500"
-                  : record.aiLikelihood > 30
-                  ? "bg-yellow-500"
-                  : "bg-emerald-500"
-              }`}
-              style={{ width: `${record.aiLikelihood}%` }}
-            />
-          </div>
-
-          <p className="text-[11px] text-slate-400 leading-normal">
-            Calculated directly from AASIST raw softmax spoof probability: {record.spoofProbability ?? (record.aiLikelihood / 100)}.
-          </p>
         </div>
 
-        {/* 2. Bonafide Probability */}
-        <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-5 space-y-3">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-slate-400">Bonafide Probability</span>
-            <span
-              className={`text-xs font-bold ${
-                (record.bonafideProbability ?? (1 - record.aiLikelihood / 100)) > 0.6
-                  ? "text-emerald-400"
-                  : "text-slate-400"
-              }`}
-            >
-              {Math.round((record.bonafideProbability ?? (1 - record.aiLikelihood / 100)) * 100)}%
-            </span>
-          </div>
+        {/* Explanation text */}
+        <p className="text-sm text-slate-300 bg-black/20 p-4 rounded-xl border border-white/5 leading-relaxed">
+          {record.explanation}
+        </p>
 
-          <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
-            <div
-              className="h-full rounded-full transition-all bg-emerald-500"
-              style={{
-                width: `${Math.round((record.bonafideProbability ?? (1 - record.aiLikelihood / 100)) * 100)}%`,
-              }}
-            />
-          </div>
-
-          <p className="text-[11px] text-slate-400 leading-normal">
-            Confidence score that this speech sample originates from a living human vocal tract.
-          </p>
-        </div>
-
-        {/* 3. Deep Learning Architecture */}
-        <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-5 space-y-3">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-slate-400">Model Architecture</span>
-            <span className="text-xs font-bold text-indigo-400">
-              {record.modelName || "AASIST"}
-            </span>
-          </div>
-
-          <div className="text-xs text-slate-300 font-mono bg-slate-800/60 p-2.5 rounded-lg border border-slate-700/50">
-            Spectro-Temporal Graph Attention Network
-          </div>
-
-          <p className="text-[11px] text-slate-400 leading-normal">
-            Evaluated on raw 16 kHz waveform with heterogeneous graph attention.
-          </p>
-        </div>
-      </div>
-
-      {/* Audio Waveform & Player */}
-      {record.audioUrl && (
-        <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-5 flex items-center justify-between gap-4">
-          <div className="flex items-center gap-4">
-            <button
-              onClick={togglePlay}
-              className="w-12 h-12 rounded-xl bg-blue-600 hover:bg-blue-500 text-white flex items-center justify-center shrink-0 transition-colors shadow-sm"
-              aria-label={isPlaying ? "Pause playback" : "Play audio"}
-            >
-              {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5 ml-0.5" />}
-            </button>
-            <div>
-              <div className="text-sm font-semibold text-white">Audio Playback</div>
-              <div className="text-xs text-slate-400">Listen to the inspected voice recording</div>
+        {/* Sub-Scores Panel per SPEC.md */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-2">
+          {/* Synthetic Voice Score */}
+          <div className="bg-slate-900/60 border border-slate-800 p-4 rounded-2xl space-y-2">
+            <div className="flex items-center justify-between text-xs text-slate-400 font-medium">
+              <span className="flex items-center gap-1.5">
+                <Layers className="w-3.5 h-3.5 text-indigo-400" /> Synthetic Score
+              </span>
+              <span className="text-white font-bold font-mono">{sub.synthetic_voice_score}/100</span>
             </div>
-            <audio
-              ref={audioRef}
-              src={record.audioUrl}
-              onEnded={() => setIsPlaying(false)}
-              className="hidden"
-            />
+            <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
+              <div
+                className="bg-rose-500 h-2 rounded-full transition-all duration-500"
+                style={{ width: `${Math.min(100, Math.max(0, sub.synthetic_voice_score))}%` }}
+              />
+            </div>
+            <p className="text-[11px] text-slate-500">Cloned / synthesized artifact confidence</p>
           </div>
 
-          {/* Simple waveform visual */}
-          <div className="hidden sm:flex items-center gap-1 h-8 opacity-60">
-            {[40, 65, 85, 30, 70, 95, 50, 80, 60, 45, 90, 75, 55, 35, 80, 60, 40].map(
-              (height, idx) => (
-                <div
-                  key={idx}
-                  className="w-1 bg-blue-400 rounded-full"
-                  style={{ height: `${height}%` }}
-                />
-              )
-            )}
+          {/* Replay Channel Score */}
+          <div className="bg-slate-900/60 border border-slate-800 p-4 rounded-2xl space-y-2">
+            <div className="flex items-center justify-between text-xs text-slate-400 font-medium">
+              <span className="flex items-center gap-1.5">
+                <Radio className="w-3.5 h-3.5 text-amber-400" /> Replay Score
+              </span>
+              <span className="text-white font-bold font-mono">{sub.replay_channel_score}/100</span>
+            </div>
+            <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
+              <div
+                className="bg-amber-500 h-2 rounded-full transition-all duration-500"
+                style={{ width: `${Math.min(100, Math.max(0, sub.replay_channel_score))}%` }}
+              />
+            </div>
+            <p className="text-[11px] text-slate-500">Loudspeaker & acoustic reflections</p>
           </div>
+
+          {/* Naturalness Score */}
+          <div className="bg-slate-900/60 border border-slate-800 p-4 rounded-2xl space-y-2">
+            <div className="flex items-center justify-between text-xs text-slate-400 font-medium">
+              <span className="flex items-center gap-1.5">
+                <Activity className="w-3.5 h-3.5 text-emerald-400" /> Naturalness Score
+              </span>
+              <span className="text-white font-bold font-mono">{sub.naturalness_score}/100</span>
+            </div>
+            <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
+              <div
+                className="bg-emerald-500 h-2 rounded-full transition-all duration-500"
+                style={{ width: `${Math.min(100, Math.max(0, sub.naturalness_score))}%` }}
+              />
+            </div>
+            <p className="text-[11px] text-slate-500">Vocal tract dynamics & prosodic variation</p>
+          </div>
+        </div>
+
+        {/* Audio Player & Recommended Action */}
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-4 border-t border-white/5">
+          {record.audioUrl ? (
+            <div className="flex items-center gap-3 w-full sm:w-auto">
+              <audio ref={audioRef} src={record.audioUrl} onEnded={() => setIsPlaying(false)} className="hidden" />
+              <button
+                onClick={togglePlay}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl bg-white/10 hover:bg-white/15 text-white text-xs font-semibold transition-colors"
+              >
+                {isPlaying ? <Pause className="w-4 h-4 text-indigo-400" /> : <Play className="w-4 h-4 text-indigo-400" />}
+                {isPlaying ? "Pause Recording" : "Play Inspected Clip"}
+              </button>
+            </div>
+          ) : <div />}
+
+          <div className="text-xs text-right text-slate-400 w-full sm:w-auto">
+            Action: <span className="text-indigo-300 font-semibold">{record.recommendedAction}</span>
+          </div>
+        </div>
+
+        {/* Model Calibration Note per SPEC.md */}
+        {record.detection_source === "aasist" && (
+          <div className="p-3 bg-slate-900/40 rounded-xl border border-slate-800 flex items-start gap-2 text-[11px] text-slate-400">
+            <Info className="w-4 h-4 text-indigo-400 shrink-0 mt-0.5" />
+            <span>
+              <strong>AASIST Architecture Note:</strong> Model was trained on ASVspoof2019 dataset. Outputs are calibrated in conjunction with prosodic and channel metrics.
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* Flags section */}
+      {record.flags && record.flags.length > 0 && (
+        <div className="bg-slate-900/50 border border-slate-800/80 rounded-2xl p-5 space-y-3">
+          <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400">Inspection Flags</h3>
+          <ul className="space-y-2">
+            {record.flags.map((flag, idx) => (
+              <li key={idx} className="flex items-center gap-2 text-xs text-slate-300">
+                <CheckCircle2 className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                {flag}
+              </li>
+            ))}
+          </ul>
         </div>
       )}
-
-      {/* Action Footer */}
-      <div className="flex justify-end pt-2">
-        <button
-          onClick={onAnalyzeAnother}
-          className="px-6 py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-sm shadow-md transition-colors"
-        >
-          Check Another Audio Sample
-        </button>
-      </div>
     </div>
   );
 };
