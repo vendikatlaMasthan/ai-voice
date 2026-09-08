@@ -16,8 +16,8 @@ app = FastAPI(
     title="VoiceShield API",
     description=(
         "Production AI Voice-Cloning Detection & Anti-Fraud Security Engine. "
-        "Integrates 16kHz audio preprocessing, fine-tuned transformer deepfake detection, "
-        "deterministic context fraud analysis, and multi-signal risk fusion scoring."
+        "Integrates 16kHz audio preprocessing, multi-tier deepfake detection (Reality Defender, AASIST, Wav2Vec2), "
+        "prosodic anomaly analysis, and unified classification scoring."
     ),
     version="1.0.0 (Phase 4)",
     docs_url="/docs",

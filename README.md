@@ -1,4 +1,4 @@
-# VoiceShield: Real-time AI Voice-Cloning Detection & Fraud Prevention
+# VoiceShield AI: Multi-Signal Voice Cloning Detection & Fraud Defense
 
 **Smart India Hackathon (SIH 2026) — Problem Statement 26104**  
 **Real-Time Audio Deepfake Detection & Multi-Signal Risk Engine**
@@ -7,117 +7,95 @@
 
 ## 1. Project Overview
 
-VoiceShield is an anti-fraud security engine designed to detect synthetic speech, AI voice clones (e.g., ElevenLabs, Kokoro, Hume AI, Amazon Polly, Speechify, Tortoise-TTS, RVC), replay attacks, and audio deepfakes to prevent impersonation fraud in real-time communication.
+VoiceShield AI is an audio anti-spoofing and anti-fraud security engine designed to detect synthetic speech, AI voice clones (e.g., ElevenLabs, Kokoro, Hume AI, Amazon Polly, Speechify, Tortoise-TTS, RVC), replay attacks, and audio deepfakes in real-time communication.
 
-The system combines:
-1. **Audio Preprocessing**: Standardizes audio to 16 kHz mono, validates duration bounds (1.0s–30.0s), trims silence, and computes acoustic metrics (SNR, RMS).
-2. **Tiered Voice Clone Detection**:
-   - **Tier 1 (Primary)**: Reality Defender API integration for high-accuracy cloud deepfake detection.
-   - **Tier 2 (Fallback)**: Uses the pretrained `garystafford/wav2vec2-deepfake-voice-detector` transformer model for local inference.
-   - **Tier 3 (Baseline)**: Deterministic spectral analysis fallback if deep learning runtimes are unavailable.
-3. **Prosody & Acoustic Anomaly Analysis**: Computes pitch variations, jitter, spectral centroid shifts, and high-frequency roll-off to flag replay attacks and abnormal vocal signatures.
-4. **Risk & Context Engine**: Combines detection signals ($P_{\text{fake}}, A, C$) into an explainable 0–100 risk score with actionable triggers (`ALLOW`, `WARN`, `SECONDARY_VERIFICATION`, `BLOCK`).
-5. **Unified Classification Contract**: Authoritative verdict categorization into `GENUINE_LIVE`, `REPLAYED_RECORDED`, `SYNTHETIC_AI_GENERATED`, and `UNCERTAIN`.
-
----
-
-## 2. Detection Architecture & Multi-Tier Strategy
-
-### Multi-Tier Detection Flow
-VoiceShield enforces strict hierarchical inference fallback:
-- **Tier 1 — Reality Defender API**: When configured with `REALITY_DEFENDER_API_KEY`, audio is submitted to Reality Defender. A 6-second timeout and handling for rate limits (429) ensure rapid response.
-- **Tier 2 — Pretrained Local Wav2Vec2**: If Reality Defender is unconfigured, times out, or fails, the pipeline automatically falls back to the pretrained `garystafford/wav2vec2-deepfake-voice-detector` model.
-- **Tier 3 — Baseline Spectral Detector**: If GPU/CPU transformer dependencies fail, deterministic spectral feature analysis is utilized.
-
-### Unified Classification Contract
-Every analysis produces one of four standardized verdicts:
-- `GENUINE_LIVE`: Natural vocal variations, pauses, and acoustics characteristic of authentic live human speech.
-- `REPLAYED_RECORDED`: Acoustic signatures indicating audio played back through a loudspeaker or re-recorded with room acoustics.
-- `SYNTHETIC_AI_GENERATED`: Digital synthesis artifacts characteristic of AI voice cloning models.
-- `UNCERTAIN`: Borderline or mixed acoustic signals, or low SNR audio, preventing conclusive determination.
-
-### Calibrated Empirical Performance
-Accuracy metrics are reported honestly based on empirical evaluation test sets without fabricated or unverified 99% accuracy claims. Inconclusive or borderline samples are transparently labeled as `UNCERTAIN` rather than forcing false certainty.
+### Key Architectural Pillars (conforming to `SPEC.md`):
+1. **Universal Audio Ingestion Pipeline**: Every code path receiving audio converts incoming bytes (WebM, Opus, MP3, WAV, M4A, FLAC, AAC) into standard 16kHz mono float32 PCM via a single shared FFmpeg step before any downstream processing.
+2. **Tiered Detection Pipeline (Priority Order)**:
+   - **Tier 1 (Primary)**: Reality Defender RealAPI (8-second timeout cap, when API key is configured).
+   - **Tier 2 (Secondary)**: AASIST (Spectro-Temporal Graph Attention Network trained on the ASVspoof2019 benchmark).
+   - **Tier 3 (Fallback)**: Pretrained Wav2Vec2 transformer (`garystafford/wav2vec2-deepfake-voice-detector`).
+   - **Tier 4 (Baseline)**: Deterministic spectral feature analysis fallback.
+3. **Local Heuristic Prosody & Replay Analysis**: Computes pitch variation, jitter, spectral centroid dynamics, and high-frequency roll-off to evaluate `replay_channel_score` and `naturalness_score`. Always runs in parallel with model inference.
+4. **Unified Classification Contract**: Authoritative classification into:
+   - `GENUINE_LIVE`: Authentic human speech with natural prosody and resonance.
+   - `REPLAYED_RECORDED`: Loudspeaker playback or room re-recording acoustic signatures.
+   - `SYNTHETIC_AI_GENERATED`: Phase discontinuities and digital synthesis artifacts.
+   - `UNCERTAIN`: Inconclusive acoustic signals or conflicting detection tier scores.
+5. **AASIST Calibration Caveat**: AASIST was trained on ASVspoof2019 (telephone-grade audio) and can miscalibrate on clean microphone recordings. If AASIST indicates synthetic speech but naturalness is high and replay score is low on clean SNR, VoiceShield routes to `UNCERTAIN` rather than forcing a false-positive synthetic verdict.
+6. **Hard 15-Second Timeout**: End-to-end hard ceiling on analysis guarantees bounded latency across all tiers.
+7. **Complete Error Sanitization**: Raw exceptions, memory addresses (e.g., `<_io.BytesIO object at ...>`), and stack traces are logged on the server only and never exposed to the user.
 
 ---
 
-## 3. API Specification
+## 2. Classification Contract
 
-### Available Endpoints:
+Every analysis produces a standardized response conforming to the canonical contract:
 
-| Method | Route | Description |
-| :--- | :--- | :--- |
-| `GET` | `/health` | Service status, active version, and supported models |
-| `POST` | `/analyze` | Preprocesses audio, runs tiered deepfake detection, evaluates prosody/context, and returns unified classification and risk assessment |
-| `POST` | `/api/analyze` | Frontend gateway endpoint forwarding to persistent inference daemon with timeout protection |
-
----
-
-### Example Workflow: Analyze Audio
-
-```bash
-curl -X POST "http://localhost:3000/api/analyze" \
-  -F "file=@test_samples/ai/fake_01.wav" \
-  -F "caller_id=+1-555-0199" \
-  -F "is_caller_recognized=false" \
-  -F "claimed_role=CEO" \
-  -F "requested_transaction_amount=75000" \
-  -F "normal_transaction_amount=5000" \
-  -F "is_urgent=true" \
-  -F "urgency_reason=Immediate vendor acquisition deadline"
-```
-
-**Response:**
 ```json
 {
-  "call_id": "CALL-B812F90A",
-  "classification": "SYNTHETIC_AI_GENERATED",
-  "verdict": "SYNTHETIC_AI_GENERATED",
-  "risk_score": 92,
-  "risk_level": "HIGH",
-  "deepfake_detection": {
-    "prediction": "FAKE",
-    "classification": "SYNTHETIC_AI_GENERATED",
-    "verdict": "SYNTHETIC_AI_GENERATED",
-    "fake_probability": 0.86,
-    "real_probability": 0.14,
-    "model_type": "Wav2Vec2",
-    "model_id": "garystafford/wav2vec2-deepfake-voice-detector",
-    "inference_time_ms": 110.2
+  "classification": "GENUINE_LIVE",
+  "verdict": "GENUINE_LIVE",
+  "sub_scores": {
+    "synthetic_voice_score": 1.2,
+    "replay_channel_score": 15.4,
+    "naturalness_score": 84.6
   },
-  "prosody_analysis": {
-    "acoustic_anomaly": 0.22,
-    "anomaly_reasons": ["Acoustic characteristics consistent with digital speech synthesis"]
-  },
-  "flags": [
-    "High synthetic voice probability (86.0%)",
-    "Unrecognized caller asserting high-authority executive role: 'CEO'",
-    "Requested transaction amount ($75,000.00) is 15.0x higher than normal baseline ($5,000.00)",
-    "High urgency and immediate execution pressure detected"
-  ],
-  "recommended_action": "SECONDARY_VERIFICATION",
+  "detection_source": "aasist",
+  "risk_level": "Low",
+  "explanation": "Natural speech dynamics, vocal variation, and human resonance verified (Naturalness Score: 84.6/100).",
+  "recommended_action": "ALLOW",
   "audio_metadata": {
     "sample_rate": 16000,
-    "original_duration_sec": 3.0,
-    "processed_duration_sec": 3.0,
-    "estimated_snr_db": 34.2,
-    "rms_db": -12.4
-  }
+    "original_duration_sec": 4.5,
+    "processed_duration_sec": 4.5,
+    "estimated_snr_db": 24.1,
+    "rms_db": -22.3
+  },
+  "flags": [
+    "Natural human vocal tract acoustics verified (Naturalness: 84.6/100)"
+  ],
+  "scan_id": "VS-1725791200-A9B1C2"
 }
 ```
 
 ---
 
-## 4. Running Tests
+## 3. API Specification
 
-Run all automated unit and integration tests across Preprocessing, Detector, Risk Engine, and API:
+| Method | Route | Description |
+| :--- | :--- | :--- |
+| `GET` | `/health` / `/api/health` | Health status, active architecture, and detection tiers |
+| `POST` | `/analyze` / `/api/analyze` | Unified endpoint: converts audio via FFmpeg, runs tiered inference, and returns canonical 4-class contract |
 
+### Example cURL:
 ```bash
-python -m unittest discover -v -s tests -p "test_*.py"
+curl -X POST "http://localhost:8000/api/analyze" \
+  -F "file=@test_samples/ai/fake_01.wav"
 ```
 
-To evaluate the test set against the running server:
+---
+
+## 4. Local Development & Testing
 
 ```bash
-python scripts/evaluate_test_set.py
+# 1. Install backend dependencies
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r backend/requirements.txt
+
+# 2. Launch FastAPI Backend (port 8000)
+uvicorn backend.main_api:app --host 0.0.0.0 --port 8000
+
+# 3. Launch Frontend (port 3000)
+npm install
+npm run dev
 ```
+
+---
+
+## 5. Model Weights & Attribution
+
+- **AASIST**: Pretrained on ASVspoof2019 logical access dataset. Weights: `backend/aasist/models/weights/AASIST.pth`.
+- **Wav2Vec2**: Pretrained open-source weights (`garystafford/wav2vec2-deepfake-voice-detector`).
+- **Reality Defender**: Cloud API integration tier.

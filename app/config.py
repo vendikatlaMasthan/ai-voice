@@ -27,8 +27,8 @@ class AudioConfig:
 @dataclass
 class ModelConfig:
     """Model inference and hardware execution parameters."""
-    # Pretrained Hugging Face audio classification model explicitly fine-tuned for deepfake voice detection
-    # Primary: "garystafford/wav2vec2-deepfake-voice-detector" (Wav2Vec2 fine-tuned on modern TTS/cloned speech)
+    # Pretrained Hugging Face audio classification model for deepfake voice detection
+    # Primary: "garystafford/wav2vec2-deepfake-voice-detector" (Pretrained Wav2Vec2 weights)
     # Alternative: "MelodyMachine/Deepfake-audio-detection-V2"
     hf_model_name: str = "garystafford/wav2vec2-deepfake-voice-detector"
     
