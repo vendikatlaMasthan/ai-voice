@@ -44,19 +44,36 @@ def determine_classification(
     acoustic_anomaly: float = 0.0,
     snr_db: float = 15.0,
     hf_energy_ratio: float = 0.0,
+    detection_source: str = "local_fallback",
 ) -> str:
     """
-    Unified Classification Contract:
+    Unified Classification Contract (SPEC.md):
     GENUINE_LIVE | REPLAYED_RECORDED | SYNTHETIC_AI_GENERATED | UNCERTAIN
     """
     ai_likelihood = round(fake_probability * 100)
     naturalness = round(max(0.0, min(1.0, 1.0 - acoustic_anomaly)) * 100)
+    replay_score = round(min(1.0, max(0.0, acoustic_anomaly)) * 100)
 
-    if fake_probability >= 0.65:
-        return "SYNTHETIC_AI_GENERATED"
-    elif snr_db < 10:
+    # Low SNR / noisy recordings cannot be reliably classified
+    if snr_db < 10:
         return "UNCERTAIN"
-    elif acoustic_anomaly >= 0.65 and fake_probability < 0.35 and hf_energy_ratio < 0.60:
+
+    # Calibration caveat for AASIST (SPEC.md Phase 2):
+    # AASIST was trained mostly on telephone-quality audio and can miscalibrate on clean mic recordings.
+    # When AASIST yields moderate/conflicting spoof scores (0.60 <= fake_prob < 0.90) while naturalness
+    # is high (>70) and replay anomalies are absent, route to UNCERTAIN.
+    # High-confidence synthesis (fake_prob >= 0.90) classifies as SYNTHETIC_AI_GENERATED.
+    if detection_source == "aasist":
+        if fake_probability >= 0.90:
+            return "SYNTHETIC_AI_GENERATED"
+        elif fake_probability >= 0.60:
+            if naturalness >= 70 and replay_score <= 35:
+                return "UNCERTAIN"
+            return "SYNTHETIC_AI_GENERATED"
+    elif fake_probability >= 0.65:
+        return "SYNTHETIC_AI_GENERATED"
+
+    if acoustic_anomaly >= 0.65 and fake_probability < 0.35 and hf_energy_ratio < 0.60:
         return "REPLAYED_RECORDED"
     elif (
         (35 <= ai_likelihood <= 65)
@@ -87,7 +104,7 @@ class BaseVoiceDetector(ABC):
 class HuggingFaceTransformerDetector(BaseVoiceDetector):
     """
     Production detector using Hugging Face Transformers & PyTorch.
-    Loads fine-tuned Wav2Vec2 audio deepfake classification models (e.g., garystafford/wav2vec2-deepfake-voice-detector).
+    Loads pretrained open-weights Wav2Vec2 audio deepfake classification models (e.g., garystafford/wav2vec2-deepfake-voice-detector).
     Optimized for CPU execution by default and NVIDIA MX450 (2GB VRAM) when CUDA is enabled.
     """
 
@@ -401,10 +418,11 @@ class BaselineSpectralDetector(BaseVoiceDetector):
 
 class VoiceCloneDetector:
     """
-    Tiered Voice Clone & Deepfake Detector:
-    - Tier 1: Reality Defender API (Primary, when API key is configured)
-    - Tier 2: Local Hugging Face Wav2Vec2 (Automatic fallback on failure, timeout, quota exhaustion, or unconfigured)
-    - Tier 3: Baseline Spectral Detector (Deterministic structural fallback)
+    Tiered Voice Clone & Deepfake Detector conforming to SPEC.md:
+    - Tier 1: Reality Defender API (Primary, when API key is configured, 8s timeout cap)
+    - Tier 2: AASIST (ASVspoof2019-trained, secondary signal fed only converted 16kHz mono audio)
+    - Tier 3: Local Hugging Face Wav2Vec2 (Fallback signal)
+    - Tier 4: Baseline Spectral Detector (Deterministic structural fallback)
     """
 
     def __init__(
@@ -412,15 +430,18 @@ class VoiceCloneDetector:
         config: Optional[ModelConfig] = None,
         use_deep_learning_backend: bool = True
     ):
+        from app.models.aasist_detector import AASISTDetector
+
         self.config = config or default_config.model
         self.use_dl = use_deep_learning_backend
         self.detector: BaseVoiceDetector
         self.reality_defender = RealityDefenderClient(
             api_key=getattr(self.config, "reality_defender_api_key", None),
-            timeout_sec=getattr(self.config, "reality_defender_timeout_sec", 6.0),
+            timeout_sec=getattr(self.config, "reality_defender_timeout_sec", 8.0),
         )
+        self.aasist = AASISTDetector()
 
-        # Select backend: Transformer if requested and dependencies exist, else Baseline
+        # Select backend for Tier 3: Transformer if requested and dependencies exist, else Baseline
         if self.use_dl:
             try:
                 import torch
@@ -434,16 +455,20 @@ class VoiceCloneDetector:
 
     def load(self) -> None:
         """Explicit model loader."""
+        try:
+            self.aasist.load_model()
+        except Exception as e:
+            print(f"[VoiceCloneDetector] AASIST warm-up error: {e}")
         self.detector.load_model()
 
     def predict(
         self, preprocessed_audio: PreprocessedAudio, audio_path: Optional[str] = None
     ) -> PredictionResult:
         """
-        Run prediction with strict detection tier order:
-        Reality Defender (Tier 1) -> Local Wav2Vec2 (Tier 2 Fallback) -> Baseline Spectral (Tier 3)
+        Run prediction with strict detection tier order (SPEC.md):
+        Reality Defender (Tier 1) -> AASIST (Tier 2) -> Local Wav2Vec2 (Tier 3) -> Baseline Spectral (Tier 4)
         """
-        # Tier 1: Reality Defender API
+        # Tier 1: Reality Defender API (Primary, 8s cap)
         if self.reality_defender.is_configured:
             ok, rd_result, state = self.reality_defender.predict(
                 preprocessed_audio, audio_path=audio_path
@@ -455,6 +480,7 @@ class VoiceCloneDetector:
                     real_probability=rd_result["real_probability"],
                     metadata={
                         **rd_result,
+                        "detection_source": "reality_defender",
                         "detection_tier": "TIER_1_REALITY_DEFENDER",
                         "audio_duration_sec": preprocessed_audio.processed_duration_sec,
                         "sample_rate": preprocessed_audio.sample_rate,
@@ -462,21 +488,45 @@ class VoiceCloneDetector:
                 )
             print(
                 f"[VoiceCloneDetector] Reality Defender skipped/failed ({state}). "
-                f"Falling back automatically to local Wav2Vec2 model."
+                f"Proceeding to Tier 2 AASIST."
             )
 
-        # Tier 2: Local Transformer Model
+        # Tier 2: AASIST Anti-Spoofing Model (Secondary signal)
+        try:
+            ok_aasist, aasist_res = self.aasist.predict(preprocessed_audio)
+            if ok_aasist and aasist_res is not None:
+                fake_p = aasist_res["fake_probability"]
+                real_p = aasist_res["real_probability"]
+                pred = "FAKE" if fake_p >= self.config.decision_threshold else "REAL"
+                return PredictionResult(
+                    prediction=pred,
+                    fake_probability=fake_p,
+                    real_probability=real_p,
+                    metadata={
+                        **aasist_res,
+                        "detection_source": "aasist",
+                        "detection_tier": "TIER_2_AASIST",
+                        "audio_duration_sec": preprocessed_audio.processed_duration_sec,
+                        "sample_rate": preprocessed_audio.sample_rate,
+                    },
+                )
+        except Exception as err:
+            print(f"[VoiceCloneDetector] AASIST inference failed ({err}). Proceeding to Tier 3 Wav2Vec2.")
+
+        # Tier 3: Local Transformer Model (Fallback signal)
         try:
             local_res = self.detector.predict(preprocessed_audio)
-            local_res.metadata["detection_tier"] = "TIER_2_LOCAL_WAV2VEC2_FALLBACK"
+            local_res.metadata["detection_source"] = "wav2vec2"
+            local_res.metadata["detection_tier"] = "TIER_3_LOCAL_WAV2VEC2_FALLBACK"
             return local_res
         except Exception as err:
             print(
                 f"[VoiceCloneDetector] Local model inference error ({err}). "
-                f"Falling back to Tier 3 BaselineSpectralDetector."
+                f"Falling back to Tier 4 BaselineSpectralDetector."
             )
             baseline = BaselineSpectralDetector(self.config)
             baseline.load_model()
             base_res = baseline.predict(preprocessed_audio)
-            base_res.metadata["detection_tier"] = "TIER_3_BASELINE_SPECTRAL_FALLBACK"
+            base_res.metadata["detection_source"] = "local_fallback"
+            base_res.metadata["detection_tier"] = "TIER_4_BASELINE_SPECTRAL_FALLBACK"
             return base_res
