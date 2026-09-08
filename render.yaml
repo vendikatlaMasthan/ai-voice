@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: voiceshield-ai-backend
+    env: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: .
+    plan: starter # 2GB RAM recommended for PyTorch + Whisper + AASIST
+    region: oregon
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: WHISPER_MODEL_ID
+        value: "openai/whisper-tiny"
+      - key: HF_OFFLINE
+        value: "0"
