@@ -32,7 +32,7 @@ class RealityDefenderClient:
         self,
         api_key: Optional[str] = None,
         api_url: Optional[str] = None,
-        timeout_sec: float = 6.0,
+        timeout_sec: float = 8.0,
     ):
         self.api_key = api_key or os.getenv("REALITY_DEFENDER_API_KEY")
         self.api_url = (
@@ -65,27 +65,21 @@ class RealityDefenderClient:
         start_time = time.perf_counter()
 
         try:
-            # Read audio bytes to upload
-            audio_bytes: bytes
-            filename = "audio.wav"
-            if audio_path and os.path.exists(audio_path):
-                filename = os.path.basename(audio_path)
-                with open(audio_path, "rb") as f:
-                    audio_bytes = f.read()
-            else:
-                # If path not available, serialize preprocessed waveform
-                import io
-                import wave
-                import numpy as np
+            # Strictly serialize preprocessed 16kHz mono waveform to standard WAV bytes.
+            # Never send raw unconverted uploaded bytes.
+            import io
+            import wave
+            import numpy as np
 
-                bio = io.BytesIO()
-                waveform_arr = (np.array(audio.waveform, dtype=np.float32) * 32767.0).clip(-32768, 32767).astype(np.int16)
-                with wave.open(bio, "wb") as wf:
-                    wf.setnchannels(1)
-                    wf.setsampwidth(2)
-                    wf.setframerate(audio.sample_rate)
-                    wf.writeframes(waveform_arr.tobytes())
-                audio_bytes = bio.getvalue()
+            filename = "audio_16k_mono.wav"
+            bio = io.BytesIO()
+            waveform_arr = (np.array(audio.waveform, dtype=np.float32) * 32767.0).clip(-32768, 32767).astype(np.int16)
+            with wave.open(bio, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(audio.sample_rate)
+                wf.writeframes(waveform_arr.tobytes())
+            audio_bytes = bio.getvalue()
 
             boundary = f"----VoiceShieldBoundary{int(time.time() * 1000)}"
             body = (

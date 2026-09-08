@@ -50,9 +50,10 @@ class AudioPreprocessor:
     def load_audio_file(self, file_path: Union[str, Path]) -> Tuple[List[float], int]:
         """
         Load an audio file from disk, convert to float array in [-1.0, 1.0], and get sample rate.
-        Supports all major formats (WAV, MP3, M4A, FLAC, OGG, WEBM, AAC) using universal ffmpeg
-        decoding with fallback to soundfile and native wave modules.
+        Routes strictly through the universal shared ffmpeg conversion pipeline.
         """
+        from app.audio.ingestion import convert_and_decode_to_16k_mono, CorruptAudioError as IngestCorruptError
+
         path = Path(file_path)
         if not path.exists() or not path.is_file():
             raise FileNotFoundAudioError(f"Audio file not found: '{file_path}'")
@@ -60,109 +61,12 @@ class AudioPreprocessor:
         if path.stat().st_size == 0:
             raise CorruptAudioError(f"Audio file is empty (0 bytes): '{file_path}'")
 
-        # 1. Primary decoder: Universal ffmpeg decoding (supports WAV, MP3, M4A, FLAC, OGG, WEBM, AAC)
         try:
-            cmd = [
-                "ffmpeg",
-                "-nostdin",
-                "-v", "error",
-                "-i", str(path),
-                "-f", "s16le",
-                "-acodec", "pcm_s16le",
-                "-ar", "16000",
-                "-ac", "1",
-                "-"
-            ]
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            out_bytes, err_bytes = proc.communicate(timeout=15)
-
-            if proc.returncode == 0 and len(out_bytes) > 0:
-                total_samples = len(out_bytes) // 2
-                if total_samples == 0:
-                    raise CorruptAudioError(f"Decoded audio file contains 0 samples: '{file_path}'")
-                fmt = f"<{total_samples}h"
-                ints = struct.unpack(fmt, out_bytes)
-                samples = [val / 32768.0 for val in ints]
-                return samples, 16000
-            elif proc.returncode != 0:
-                # If ffmpeg returned non-zero, check if file is corrupt
-                err_msg = err_bytes.decode("utf-8", errors="ignore").strip()
-                if "Invalid data found" in err_msg or "does not contain any stream" in err_msg:
-                    raise CorruptAudioError(f"Corrupt or invalid audio file '{file_path}': {err_msg}")
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            raise CorruptAudioError(f"Timeout decoding audio file '{file_path}'")
-        except FileNotFoundError:
-            # ffmpeg binary not installed on PATH, continue to fallback libraries
-            pass
-        except CorruptAudioError:
-            raise
-        except Exception:
-            pass
-
-        # 2. Secondary fallback: soundfile if installed
-        try:
-            import soundfile as sf
-            data, sr = sf.read(str(path), dtype="float32")
-            if len(data.shape) > 1 and data.shape[1] > 1:
-                mono_data = data.mean(axis=1)
-            else:
-                mono_data = data.flatten()
-            return mono_data.tolist(), sr
-        except ImportError:
-            pass
-        except Exception:
-            pass
-
-        # 3. Native fallback: Python standard library 'wave' for standard PCM WAV files
-        try:
-            with wave.open(str(path), "rb") as wav:
-                num_channels = wav.getnchannels()
-                sample_width = wav.getsampwidth()
-                frame_rate = wav.getframerate()
-                num_frames = wav.getnframes()
-
-                if num_frames == 0:
-                    raise CorruptAudioError(f"Audio file contains 0 frames: '{file_path}'")
-
-                raw_bytes = wav.readframes(num_frames)
-
-                samples: List[float] = []
-                if sample_width == 2:  # 16-bit PCM
-                    total_samples = len(raw_bytes) // 2
-                    fmt = f"<{total_samples}h"
-                    ints = struct.unpack(fmt, raw_bytes)
-                    if num_channels == 1:
-                        samples = [val / 32768.0 for val in ints]
-                    else:
-                        samples = [
-                            sum(ints[i : i + num_channels]) / (num_channels * 32768.0)
-                            for i in range(0, len(ints), num_channels)
-                        ]
-                elif sample_width == 1:  # 8-bit unsigned PCM
-                    if num_channels == 1:
-                        samples = [(b - 128) / 128.0 for b in raw_bytes]
-                    else:
-                        samples = [
-                            sum((raw_bytes[i + c] - 128) / 128.0 for c in range(num_channels)) / num_channels
-                            for i in range(0, len(raw_bytes), num_channels)
-                        ]
-                elif sample_width == 4:  # 32-bit int
-                    total_samples = len(raw_bytes) // 4
-                    ints = struct.unpack(f"<{total_samples}i", raw_bytes)
-                    if num_channels == 1:
-                        samples = [val / 2147483648.0 for val in ints]
-                    else:
-                        samples = [
-                            sum(ints[i : i + num_channels]) / (num_channels * 2147483648.0)
-                            for i in range(0, len(ints), num_channels)
-                        ]
-                else:
-                    raise CorruptAudioError(f"Unsupported bit depth ({sample_width * 8}-bit) in '{file_path}'")
-
-                return samples, frame_rate
-
-        except (wave.Error, struct.error, EOFError) as err:
+            waveform_arr, sr, _ = convert_and_decode_to_16k_mono(path, original_filename=path.name)
+            return waveform_arr.tolist(), sr
+        except IngestCorruptError as err:
+            raise CorruptAudioError(str(err)) from err
+        except Exception as err:
             raise CorruptAudioError(f"Failed to decode audio file '{file_path}': {str(err)}") from err
 
     def resample(self, samples: List[float], orig_sr: int, target_sr: int) -> List[float]:
